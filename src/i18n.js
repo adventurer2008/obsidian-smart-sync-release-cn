@@ -70,6 +70,12 @@ const englishEditionFailures = {
 	EDITION_SERVICE_MISMATCH: 'This connection belongs to another sync service. Use the matching edition. Local notes are preserved.',
 };
 export const messages = {
+	'lan.disabled': '已关闭',
+	'lan.statusTitle': '局域网连接状态',
+	'lan.unsupported': '当前宿主不支持直连，使用云端',
+	'lan.connected': '已直连 {count} 台设备',
+	'lan.cloud': '暂无直连，使用云端',
+	'lan.summary': '{state}。本次连接密文：局域网已收 {received}、已发 {sent}；云端已收 {cloud}；回退 {fallbacks} 次。',
 	'sync.waitingStage': '仍在等待：{stage}。可停止本轮；若仍无法结束，请保存后重启 Obsidian。',
 	'sync.stage.connecting': '连接同步服务',
 	'sync.stage.unlocking': '解锁同步密钥',
@@ -225,9 +231,9 @@ export const messages = {
 	'sorting.deeperHelp': '五级及以下共用此规则；默认同四级目录，也可自定义。',
 	'sorting.enabled': '启用排序',
 	'notes.recentEnabled': '启用最近',
-	'notes.recentEnabledHelp': '显示最近打开的文件入口。关闭后停止记录最近打开的文件。',
+	'notes.recentEnabledHelp': '入口：右侧栏顶部的时钟标签，或命令面板“无界同步：最近打开的文件”。关闭后停止记录。',
 	'notes.noteSearchEnabled': '启用搜索',
-	'notes.noteSearchEnabledHelp': '显示笔记搜索入口，仅搜索本机已有笔记。',
+	'notes.noteSearchEnabledHelp': '入口：右侧栏顶部的文件搜索标签，或命令面板“无界同步：搜索笔记”。仅搜索本机已有笔记。',
 	'notes.saveFailed': '功能设置未保存，请重试。',
 	'sorting.enabledHelp': '对本机当前笔记库生效；关闭后恢复原来的排序。',
 	'sorting.unavailable': '文件列表尚未就绪或当前版本不支持，请打开文件列表后重试。',
@@ -686,7 +692,7 @@ export const messages = {
 // Draft only: no English language option is released.
 export const englishDraft = {
 	'notes.recentEnabled': 'Enable recent files',
-	'notes.recentEnabledHelp': 'Show recent files. Turning this off stops recording opened files.',
+	'notes.recentEnabledHelp': 'Use the clock tab in the right sidebar or the Recent files command. Turning this off stops recording opened files.',
 	'notes.noteSearchEnabled': 'Enable note search',
 	'notes.noteSearchEnabledHelp': 'Show note search for locally available notes.',
 	'notes.saveFailed': 'Could not save this setting. Try again.',

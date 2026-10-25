@@ -126,7 +126,7 @@ export function registerNoteSearch(owner) {
 	owner.registerView(recentType, leaf => new NoteSearchView(leaf, owner, recentType, true));
 	const openView = async (type, focus) => {
 		if (!enabled(type === recentType)) return;
-		const leaf = owner.app.workspace.getLeavesOfType(type)[0] ?? owner.app.workspace.getLeftLeaf(false);
+		const leaf = owner.app.workspace.getLeavesOfType(type)[0] ?? owner.app.workspace.getRightLeaf(false);
 		if (!leaf) return;
 		await leaf.setViewState({ type, active: true });
 		await owner.app.workspace.revealLeaf(leaf);
@@ -134,20 +134,35 @@ export function registerNoteSearch(owner) {
 	};
 	owner.openRecentFiles = () => openView(recentType, false);
 	owner.openNoteSearch = () => openView(viewType, true);
-	const ribbons = new Map();
-	let searchCommand = false;
+	let layoutReady = false, disposed = false;
+	owner.register?.(() => { disposed = true; });
+	const opening = new Map();
+	const ensureDefaultView = type => {
+		if (disposed || owner.app.workspace.getLeavesOfType(type).length) return;
+		if (opening.has(type)) return opening.get(type);
+		const leaf = owner.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		const task = leaf.setViewState({ type, active: false }).then(() => {
+			if (disposed || !enabled(type === recentType)) leaf.detach();
+		}).finally(() => opening.delete(type));
+		opening.set(type, task);
+		return task;
+	};
+	let searchCommand = false, recentCommand = false;
 	owner.refreshNoteTools = async () => {
 		const closing = [];
-		for (const [recent, type, icon, title, open] of [
-			[true, recentType, 'history', '无界同步 · 最近', owner.openRecentFiles],
-			[false, viewType, 'file-search-2', '无界同步 · 搜索笔记', owner.openNoteSearch],
-		]) {
+		for (const [recent, type] of [[true, recentType], [false, viewType]]) {
 			if (enabled(recent)) {
-				if (!ribbons.has(type)) ribbons.set(type, { element: owner.addRibbonIcon(icon, title, () => { void open(); }) });
+				if (layoutReady) await ensureDefaultView(type);
 			} else {
-				ribbons.get(type)?.element?.remove(); ribbons.delete(type);
 				for (const leaf of owner.app.workspace.getLeavesOfType?.(type) ?? []) closing.push(leaf.detach());
 			}
+		}
+		if (enabled(true) && !recentCommand) {
+			owner.addCommand({ id: 'recent-files', name: '最近打开的文件', callback: () => { void owner.openRecentFiles(); } });
+			recentCommand = true;
+		} else if (!enabled(true) && recentCommand) {
+			owner.removeCommand('recent-files'); recentCommand = false;
 		}
 		if (enabled(false) && !searchCommand) {
 			owner.addCommand({ id: 'search-notes', name: '搜索笔记', callback: () => { void owner.openNoteSearch(); } });
@@ -158,7 +173,10 @@ export function registerNoteSearch(owner) {
 		await Promise.all(closing);
 	};
 	void owner.refreshNoteTools();
-	owner.app.workspace.onLayoutReady?.(() => { void owner.refreshNoteTools(); });
+	owner.app.workspace.onLayoutReady?.(() => {
+		layoutReady = true;
+		if (!disposed) void owner.refreshNoteTools().catch(() => new Notice('最近和搜索侧栏暂时无法打开，请通过命令面板重试。'));
+	});
 }
 
 export class NoteSearchView extends ItemView {

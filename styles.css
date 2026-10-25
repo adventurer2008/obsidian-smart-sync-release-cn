@@ -214,3 +214,6 @@
 }
 
 .smart-sync-billing button.smart-sync-plan-action[hidden] { display: none !important; }
+
+.smart-sync-common .smart-sync-manual-action { flex-wrap: wrap; max-width: 100%; }
+.smart-sync-manual-feedback { flex-basis: 100%; margin-top: 0.4rem; font-size: var(--font-ui-small); color: var(--text-muted); overflow-wrap: anywhere; }

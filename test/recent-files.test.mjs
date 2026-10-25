@@ -69,7 +69,7 @@ test('recent file click uses central workspace leaf and opens attachments too', 
 	assert.equal(opened, file);
 });
 
-test('recent has its own button and sidebar view, preserving the separate search view', async () => {
+test('recent and search open as separate right sidebar tabs', async () => {
 	const { app } = fixture();
 	let opened;
 	app.workspace.getLeaf = () => ({ view: {}, openFile: async file => { opened = file.path; } });
@@ -96,15 +96,15 @@ test('recent has its own button and sidebar view, preserving the separate search
 		return element;
 	};
 	app.workspace.getLeavesOfType = type => leaves.has(type) ? [leaves.get(type)] : [];
-	app.workspace.getLeftLeaf = () => ({ async setViewState({ type }) {
+	app.workspace.getRightLeaf = () => ({ async setViewState({ type }) {
 		if (this.view?.getViewType() === type) return;
 		this.view = factories.get(type)(this);
 		this.view.contentEl = decorate(dom.window.document.createElement('div'));
 		leaves.set(type, this); await this.view.onOpen();
 	} });
 	app.workspace.revealLeaf = async leaf => { app.workspace.revealed = leaf; };
-	assert.deepEqual(ribbons.map(item => item.icon), ['history', 'file-search-2']);
-	ribbons[0].callback(); await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(ribbons.length, 0);
+	await owner.openRecentFiles();
 	const view = leaves.get('test-recent-files').view;
 	assert.equal(view.getDisplayText(), '最近');
 	assert.equal(view.getIcon(), 'history');
@@ -135,19 +135,21 @@ test('feature switches remove entrances and views, stop recent recording and ree
 	app.workspace.on = (name, callback) => { events.set(name, callback); return {}; };
 	app.vault.on = () => ({});
 	app.workspace.getLeavesOfType = type => [{ detach() { closed.push(type); } }];
-	app.workspace.getLeftLeaf = () => { throw Error('disabled feature tried to open'); };
+	app.workspace.getRightLeaf = () => { throw Error('disabled feature tried to open'); };
 	const owner = { app, manifest: { id: 'test' }, data: { settings: {} }, registerEvent() {}, registerView() {},
 		addCommand: command => commands.set(command.id, command), removeCommand: id => commands.delete(id),
 		addRibbonIcon: icon => { const item = { icon, removed: false, remove() { this.removed = true; } }; icons.push(item); return item; } };
 	registerNoteSearch(owner);
-	assert.equal(icons.filter(icon => !icon.removed).length, 2);
+	assert.equal(icons.length, 0);
+	assert.deepEqual([...commands.keys()], ['recent-files', 'search-notes']);
 	const before = [...owner.recentFiles.paths];
 	owner.data.settings.recentEnabled = false;
 	await owner.refreshNoteTools();
 	events.get('file-open')(files.get('目录/文件10.md'));
 	assert.deepEqual(owner.recentFiles.paths, before);
 	assert.deepEqual(closed, ['test-recent-files']);
-	assert.deepEqual(icons.filter(icon => !icon.removed).map(icon => icon.icon), ['file-search-2']);
+	assert.equal(commands.has('recent-files'), false);
+	assert.equal(icons.length, 0);
 	await owner.openRecentFiles();
 	owner.data.settings.noteSearchEnabled = false;
 	await owner.refreshNoteTools();
@@ -155,8 +157,8 @@ test('feature switches remove entrances and views, stop recent recording and ree
 	await owner.openNoteSearch();
 	owner.data.settings.recentEnabled = owner.data.settings.noteSearchEnabled = true;
 	await owner.refreshNoteTools(); await owner.refreshNoteTools();
-	assert.equal(icons.filter(icon => !icon.removed).length, 2);
-	assert.equal(commands.size, 1);
+	assert.equal(icons.length, 0);
+	assert.equal(commands.size, 2);
 	events.get('file-open')(files.get('目录/文件10.md'));
 	assert.equal(owner.recentFiles.paths[0], '目录/文件10.md');
 });
@@ -170,4 +172,28 @@ test('mobile recent selection opens the note then collapses the drawer', async (
 	Platform.isMobile = true;
 	try { await NoteSearchView.prototype.openResult.call(view, file); assert.equal(collapsed, true); }
 	finally { Platform.isMobile = false; }
+});
+
+
+test('layout ready adds enabled right tabs once without activating, revealing or overwriting restored views', async () => {
+ const {app}=fixture(), leaves=new Map(), created=[], commands=new Map(); let ready, dispose;
+ const restored={marker:'restored'}; leaves.set('test-note-search',[restored]);
+ app.workspace.on=app.vault.on=()=>({});
+ app.workspace.onLayoutReady=callback=>{ready=callback;};
+ app.workspace.getLeavesOfType=type=>leaves.get(type)??[];
+ app.workspace.revealLeaf=()=>{throw Error('startup must not reveal a sidebar');};
+ app.workspace.getRightLeaf=split=>{
+  assert.equal(split,false);
+  const leaf={async setViewState(state){created.push(state);leaves.set(state.type,[leaf]);},detach(){for(const [type,list] of leaves) if(list.includes(leaf)) leaves.delete(type);}};
+  return leaf;
+ };
+ const owner={app,manifest:{id:'test'},data:{settings:{}},registerEvent(){},registerView(){},register:callback=>{dispose=callback;},
+ addCommand:command=>commands.set(command.id,command),removeCommand:id=>commands.delete(id),addRibbonIcon(){throw Error('no left ribbon tools');}};
+ registerNoteSearch(owner); assert.equal(created.length,0);
+ ready(); await owner.refreshNoteTools(); await owner.refreshNoteTools();
+ assert.deepEqual(created,[{type:'test-recent-files',active:false}]);
+ assert.equal(leaves.get('test-note-search')[0],restored);
+ owner.data.settings.recentEnabled=false; await owner.refreshNoteTools(); assert.equal(leaves.has('test-recent-files'),false);
+ owner.data.settings.recentEnabled=true; await owner.refreshNoteTools(); assert.equal(created.length,2);
+ dispose(); leaves.delete('test-recent-files'); ready(); await owner.refreshNoteTools(); assert.equal(created.length,2);
 });

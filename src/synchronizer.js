@@ -356,6 +356,7 @@ export class NotebookSynchronizer {
 				// checks local content and fetches on demand if it is absent or changed.
 				if (previous?.downloaded && !previous.removed && previous.digest === info.digest) { covered++; continue; }
 				if (this.excluded(info.path) || info.bytes > Math.min(4 * 1024 * 1024, this.batchBytes - 128 * 1024) || (!info.path.toLowerCase().endsWith('.md') && info.bytes > this.attachmentLimit)) { covered++; continue; }
+				if (this.api.hasLanNotes?.()) { covered++; continue; }
 				// A reconnect may retain the latest local bytes without its prior
 				// checkpoint. Let receive verify them before fetching any body;
 				// different or disappearing files still fetch through the normal path.
@@ -589,7 +590,9 @@ export class NotebookSynchronizer {
 				info.path.toLowerCase().endsWith('.md') &&
 				typeof previous?.base === 'string'
 			) {
-				decoded = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info, this.onTiming);
+				decoded = await this.api.peerContents?.(entry.note, entry.manifest, info, undefined, this.onTiming);
+				this.assertActive();
+				decoded ??= await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info, this.onTiming);
 				const merged = mergeNote(previous.base, local, decoded.contents);
 				if (merged !== undefined) {
 					await this.host.write(info.path, merged);
@@ -615,19 +618,23 @@ export class NotebookSynchronizer {
 					info.bytes > 8 * 1024 * 1024 &&
 					!info.path.startsWith('__smart_sync_configuration__/')
 				) {
-					await unpackToSink(
+					const sinkFor = (_, bytes, digest, mtime) => { this.assertActive(); return this.host.sink(info.path, bytes, digest, mtime); };
+					const peer = await this.api.peerContents?.(entry.note, entry.manifest, info, sinkFor, this.onTiming);
+					this.assertActive();
+					if (!peer) await unpackToSink(
 						this.keys,
 						this.api.workspace,
 						entry.note,
 						entry.manifest,
 						load,
-						(_, bytes, digest, mtime) => { this.assertActive(); return this.host.sink(info.path, bytes, digest, mtime); },
+						sinkFor,
 						info,
 						this.onTiming,
 					);
 				} else {
 					const file =
 						decoded ??
+						(await this.api.peerContents?.(entry.note, entry.manifest, info, undefined, this.onTiming)) ??
 						(await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info, this.onTiming));
 					this.assertActive();
 					await this.host.write(info.path, file.contents, info.mtime);

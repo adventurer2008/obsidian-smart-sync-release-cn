@@ -18,7 +18,8 @@ export function renewalReminderAt(ends) {
 }
 export function billingCard(data, connected, now = Date.now()) {
 	const rights = data?.entitlement, order = data?.currentOrder;
-	const showOrder = order && (order.status !== 'paid' || order.purpose === 'test' || order.failureCode === 'paid_plan_conflict');
+	const hidePendingOrder = rights?.paid === true && rights.ends > now && pending.has(order?.status) && order.failureCode !== 'paid_plan_conflict';
+	const showOrder = order && !hidePendingOrder && (order.status !== 'paid' || order.purpose === 'test' || order.failureCode === 'paid_plan_conflict');
 	const free = rights?.plan === 'cn-free' && rights?.paid !== true;
 	const purchased = !free && (rights?.paid === true || data?.everPurchased === true);
 	const ends = rights?.ends ?? data?.lastPurchase?.ends;
