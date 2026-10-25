@@ -21,6 +21,16 @@ export function safeNotePath(value) {
 		throw new Error('Internal vault files are excluded');
 	return path;
 }
+// Validate host filesystem semantics in addition to the portable protocol path.
+// Colons remain valid on POSIX hosts; on Windows they address NTFS streams.
+export function safeHostPath(value, windows = false) {
+	const path = safeNotePath(value);
+	if (windows && path.split('/').some((part) =>
+		/[<>:"|?*]/.test(part) || [...part].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || /[. ]$/.test(part) ||
+		/^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$)(?:\.|$)/i.test(part)))
+		throw new Error('Unsafe Windows file name');
+	return path;
+}
 export function hex(bytes) {
 	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }

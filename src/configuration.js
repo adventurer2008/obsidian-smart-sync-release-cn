@@ -1,4 +1,4 @@
-import { safeNotePath } from './codec.js';
+import { safeNotePath, safeHostPath } from './codec.js';
 
 export const CONFIG_NAMESPACE = '__smart_sync_configuration__';
 const ordinary = {
@@ -167,13 +167,13 @@ export function configurationScope({
 	};
 }
 
-export function configurationHost(vault, normal, scope, { stopped = () => false, onPluginStateChanged = () => {} } = {}) {
+export function configurationHost(vault, normal, scope, { stopped = () => false, onPluginStateChanged = () => {}, windows = false } = {}) {
 	const adapter = vault.adapter;
 	if (!adapter) return normal;
 	const root = vault.configDir;
 	if (typeof root !== 'string' || !root)
 		throw new Error('Obsidian configuration directory is unavailable');
-	const pathFor = (path) => `${root}/${scope.decode(path)}`;
+	const pathFor = (path) => `${root}/${safeHostPath(scope.decode(path), windows)}`;
 	const isVirtual = (path) => path.startsWith(`${CONFIG_NAMESPACE}/`);
 	const pluginStatePath = `${root}/community-plugins.json`;
 	const parsePluginState = (bytes) => {

@@ -1,4 +1,4 @@
-import { safeNotePath, SEGMENT_BYTES, MAX_NOTE_BYTES } from './codec.js';
+import { safeHostPath, SEGMENT_BYTES, MAX_NOTE_BYTES } from './codec.js';
 
 export const DESKTOP_THRESHOLD = 8 * 1024 * 1024;
 const activeByVault = new Map(),
@@ -9,6 +9,7 @@ export function desktopFiles(vault, { load, stopped = () => false } = {}) {
 	const fs = load('node:fs/promises'),
 		path = load('node:path'),
 		cryptoNode = load('node:crypto');
+	const safePath = value => safeHostPath(value, path.sep === '\\');
 	const base = path.resolve(vault.adapter.getBasePath());
 	const inside = (parent, target) => {
 		const relative = path.relative(parent, target);
@@ -17,7 +18,7 @@ export function desktopFiles(vault, { load, stopped = () => false } = {}) {
 		return target;
 	};
 	const filePath = async (name) => {
-		const target = inside(base, path.resolve(base, safeNotePath(name)));
+		const target = inside(base, path.resolve(base, safePath(name)));
 		inside(await fs.realpath(base), await fs.realpath(target));
 		return target;
 	};
@@ -170,7 +171,7 @@ export function desktopFiles(vault, { load, stopped = () => false } = {}) {
 		assertActive();
 		const root = await reserve(expectedBytes),
 			temporary = path.join(root, cryptoNode.randomUUID() + '.part');
-		const target = inside(base, path.resolve(base, safeNotePath(name)));
+		const target = inside(base, path.resolve(base, safePath(name)));
 		await fs.mkdir(path.dirname(target), { recursive: true });
 		inside(await fs.realpath(base), await fs.realpath(path.dirname(target)));
 		const initial = await fs.stat(target).then(stamp, (error) => {
@@ -238,7 +239,7 @@ export function desktopFiles(vault, { load, stopped = () => false } = {}) {
 	const sameEntry = async (from, to) => {
 		assertActive();
 		// Limit aliases to spelling changes; unrelated hard links are distinct destinations.
-		if (safeNotePath(from).toLowerCase() !== safeNotePath(to).toLowerCase()) return false;
+		if (safePath(from).toLowerCase() !== safePath(to).toLowerCase()) return false;
 		try {
 			const [a, b] = await Promise.all([filePath(from), filePath(to)]);
 			const [left, right] = await Promise.all([fs.lstat(a, { bigint: true }), fs.lstat(b, { bigint: true })]);
@@ -249,10 +250,10 @@ export function desktopFiles(vault, { load, stopped = () => false } = {}) {
 		}
 	};
 	const canonicalPath = async name => {
-		const input = safeNotePath(name);
+		const input = safePath(name);
 		const actual = path.relative(await fs.realpath(base), await fs.realpath(await filePath(input))).split(path.sep).join('/');
 		// Correct casing only; never redirect a logical path through an internal link.
-		return actual.toLowerCase() === input.toLowerCase() ? safeNotePath(actual) : input;
+		return actual.toLowerCase() === input.toLowerCase() ? safePath(actual) : input;
 	};
 	return { source, sink, copy, active, prepare, sameEntry, canonicalPath };
 }

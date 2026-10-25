@@ -24,6 +24,7 @@ import {
 	inspectNote,
 	reconcileLogicalUsage,
 	safeNotePath,
+	safeHostPath,
 	unlockWorkspace,
 	unpackNote,
 	workspaceProof,
@@ -1808,6 +1809,7 @@ export default class IndependentSync extends Plugin {
 		await this.devicePreparing;
 	}
 	async connection({ allowIdleScan = false } = {}) {
+		const notePath = value => safeHostPath(value, Platform.isWin === true);
 		const api = this.api();
 		this.syncStage('connecting');
 		const pinId = `authority:${api.origin}`;
@@ -1901,14 +1903,14 @@ export default class IndependentSync extends Plugin {
 				catch (error) { if (error.code === 'ENOENT') throw planChanged(); throw error; }
 			} } : {}),
 			mtime: async (path) => {
-				const file = await abstractForPath(safeNotePath(path));
+				const file = await abstractForPath(notePath(path));
 				return file instanceof TFile && Number.isFinite(file.stat?.mtime) ? Math.trunc(file.stat.mtime) : undefined;
 			},
 			stamp: async (path) => {
 				this.startupInventory.delete(path);
 				if (this.stopped || api.signal.aborted)
 					throw new DOMException('Transfer stopped', 'AbortError');
-				const file = await abstractForPath(safeNotePath(path));
+				const file = await abstractForPath(notePath(path));
 				const stat = file instanceof TFile ? file.stat : undefined;
 				return stat && [stat.size, stat.mtime, stat.ctime].every(Number.isFinite)
 					? JSON.stringify([stat.size, stat.mtime, stat.ctime, Math.max(this.fileChanges.get(path) ?? 0, this.fileChanges.get(file.path) ?? 0)])
@@ -1937,7 +1939,7 @@ export default class IndependentSync extends Plugin {
 					.map((file) => file.path)
 					.filter((path) => {
 						try {
-							safeNotePath(path);
+							notePath(path);
 							return true;
 						} catch {
 							return false;
@@ -1945,15 +1947,15 @@ export default class IndependentSync extends Plugin {
 					}),
 			exists: async (path) =>
 				this.app.vault.adapter?.exists
-					? this.app.vault.adapter.exists(safeNotePath(path))
-					: this.app.vault.getAbstractFileByPath(safeNotePath(path)) !== null,
+					? this.app.vault.adapter.exists(notePath(path))
+					: this.app.vault.getAbstractFileByPath(notePath(path)) !== null,
 			sameEntry: async (from, to) =>
 				(this.app.vault.getAbstractFileByPath(from) !== null && this.app.vault.getAbstractFileByPath(from) === this.app.vault.getAbstractFileByPath(to)) || (await desktop?.sameEntry(from, to)) === true,
 			mkdir: async (path) => {
 				if (this.stopped) throw new Error('Plugin is unloading');
 				if (api.signal.aborted) throw new DOMException('Synchronization stopped', 'AbortError');
 				let parent = '';
-				for (const segment of safeNotePath(path).split('/')) {
+				for (const segment of notePath(path).split('/')) {
 					parent = parent ? `${parent}/${segment}` : segment;
 					const item = await abstractForPath(parent);
 					if (item instanceof TFile) throw new Error('A file occupies the folder path');
@@ -1965,8 +1967,8 @@ export default class IndependentSync extends Plugin {
 			move: async (from, to) => {
 				if (this.stopped) throw new Error('Plugin is unloading');
 				if (api.signal.aborted) throw new DOMException('Synchronization stopped', 'AbortError');
-				from = safeNotePath(from);
-				to = safeNotePath(to);
+				from = notePath(from);
+				to = notePath(to);
 				if (to.startsWith(`${from}/`)) throw new Error('Cannot move a folder inside itself');
 				const file = await abstractForPath(from);
 				const destination = await abstractForPath(to);
@@ -1989,7 +1991,7 @@ export default class IndependentSync extends Plugin {
 			removeFolder: async (path) => {
 				if (this.stopped) throw new Error('Plugin is unloading');
 				if (api.signal.aborted) throw new DOMException('Synchronization stopped', 'AbortError');
-				const folder = this.app.vault.getAbstractFileByPath(safeNotePath(path));
+				const folder = this.app.vault.getAbstractFileByPath(notePath(path));
 				if (folder && !(folder instanceof TFile) && folder.children?.length === 0)
 					await this.app.fileManager.trashFile(folder);
 			},
@@ -2005,7 +2007,7 @@ export default class IndependentSync extends Plugin {
 				};
 				await visit(path);
 				if (actual.size !== expected.length || expected.some(name => !actual.has(name))) return false;
-				const folder = this.app.vault.getAbstractFileByPath(safeNotePath(path));
+				const folder = this.app.vault.getAbstractFileByPath(notePath(path));
 				if (!folder || folder instanceof TFile) return false;
 				await this.measurePhase('removeTree', () => this.app.fileManager.trashFile(folder));
 				return true;
@@ -2016,7 +2018,7 @@ export default class IndependentSync extends Plugin {
 					.map((file) => file.path)
 					.filter((path) => {
 						try {
-							safeNotePath(path);
+							notePath(path);
 							return true;
 						} catch {
 							return false;
@@ -2027,7 +2029,7 @@ export default class IndependentSync extends Plugin {
 					const source = await desktop.source(path);
 					if (source !== undefined) return source;
 				}
-				const file = await abstractForPath(safeNotePath(path));
+				const file = await abstractForPath(notePath(path));
 				if (file === null && (await this.app.vault.adapter?.exists?.(path)))
 					throw planChanged();
 				return file instanceof TFile ? new Uint8Array(await this.app.vault.readBinary(file)) : null;
@@ -2035,7 +2037,7 @@ export default class IndependentSync extends Plugin {
 			write: async (path, bytes, mtime) => {
 				if (this.stopped) throw new Error('Plugin is unloading');
 				if (api.signal.aborted) throw new DOMException('Synchronization stopped', 'AbortError');
-				path = safeNotePath(path);
+				path = notePath(path);
 				if (bytes?.streamed) {
 					const previousTime = this.app.vault.getAbstractFileByPath(path)?.stat?.mtime;
 					if (!desktop) throw Error('Streaming copy unavailable');
@@ -2069,7 +2071,7 @@ export default class IndependentSync extends Plugin {
 			remove: async (path) => {
 				if (this.stopped) throw new Error('Plugin is unloading');
 				if (api.signal.aborted) throw new DOMException('Synchronization stopped', 'AbortError');
-				const file = this.app.vault.getAbstractFileByPath(safeNotePath(path));
+				const file = this.app.vault.getAbstractFileByPath(notePath(path));
 				if (file instanceof TFile) await this.app.fileManager.trashFile(file);
 			},
 		};
@@ -2079,6 +2081,7 @@ export default class IndependentSync extends Plugin {
 			mobile: Platform.isMobile,
 		});
 		const scopedHost = configurationHost(this.app.vault, host, scope, {
+			windows: Platform.isWin === true,
 			stopped: () => this.stopped || api.signal.aborted,
 			onPluginStateChanged: () => { this.pluginStateRestartPending = true; },
 		});
@@ -2262,6 +2265,7 @@ export default class IndependentSync extends Plugin {
 	}
 
 	onunload() {
+		this.syncSetupWindow?.close();
 		this.capacityWindow?.close();
 		this.noteEncryption?.dispose();
 		for (const view of this.noteSearchViews ?? []) void view.onClose();
@@ -2349,6 +2353,29 @@ export default class IndependentSync extends Plugin {
 		return dialog;
 	}
 	async synchronizeManually() {
+		if (edition.edition === 'cn' && !this.stopped && !this.stopping && !this.connecting && !this.running && !this.data.settings.workspace && !this.secret('account') && !this.secret('access')) {
+			if (this.syncSetupWindow) return this.syncSetupWindow;
+			const binding = () => JSON.stringify([this.data.localId, this.data.settings.origin, this.data.settings.workspace, this.secret('account'), this.secret('access')]);
+			const expected = binding();
+			const live = () => !this.stopped && !this.stopping && !this.connecting && !this.running && binding() === expected;
+			const dialog = new ChoiceWindow(this.app, '请先开通套餐', area => {
+				area.createEl('p', { text: '请先点击“购买”选择套餐并开通，再登录账号开始同步。已有账号可直接登录。' });
+				const proceed = async callback => {
+					if (this.syncSetupWindow !== dialog || !live()) { dialog.close(); return; }
+					dialog.close();
+					await callback();
+				};
+				action(area, '购买', () => proceed(() => this.openBilling()));
+				action(area, '已有账号登录', () => proceed(() => this.enrollment()));
+			});
+			dialog.onClose = () => {
+				dialog.contentEl.empty();
+				if (this.syncSetupWindow === dialog) this.syncSetupWindow = undefined;
+			};
+			this.syncSetupWindow = dialog;
+			dialog.open();
+			return dialog;
+		}
 		if (!this.running && !this.stopped && !this.stopping && !this.connecting && this.data.settings.workspace && this.data.settings.direction !== 'receive') await this.warnCapacity();
 		return this.synchronize();
 	}

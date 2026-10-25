@@ -39,6 +39,7 @@ export class LanPeers {
 	async start() {
 		if (this.closed) return;
 		try {
+			await this.presenceWork;
 			await this.tick();
 		} finally {
 			if (!this.timer && !this.closed)
@@ -49,6 +50,14 @@ export class LanPeers {
 		}
 	}
 	async tick() {
+		if (this.closed) return;
+		if (this.presenceWork) return this.presenceWork;
+		const work = this.poll();
+		this.presenceWork = work;
+		try { return await work; }
+		finally { if (this.presenceWork === work) this.presenceWork = undefined; }
+	}
+	async poll() {
 		if (this.closed || this.busy) return;
 		this.busy = true;
 		try {
