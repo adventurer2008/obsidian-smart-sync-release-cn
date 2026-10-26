@@ -30,6 +30,7 @@ const expected = [
 	'src/planning.js',
 	'src/desktop.js',
 	'src/peers.js',
+	'src/resume.js',
 ];
 if (selected) expected.push('<define:__SMART_SYNC_EDITION__>');
 expected.sort();
@@ -48,5 +49,5 @@ if (selected) {
 }
 if (JSON.stringify(manifest) !== JSON.stringify(built)) throw new Error('Manifest drift');
 console.log(
-	'Plugin closure verified: twenty-two source modules and the licensed node-diff3, noble-ed25519 and fflate modules; Obsidian and its host CodeMirror interfaces are the only external runtime imports.',
+	'Plugin closure verified: twenty-three source modules and the licensed node-diff3, noble-ed25519 and fflate modules; Obsidian and its host CodeMirror interfaces are the only external runtime imports.',
 );

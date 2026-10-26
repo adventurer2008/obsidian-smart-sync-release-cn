@@ -53,6 +53,7 @@ import {
 import { decryptRecovery, encryptRecovery } from './recovery.js';
 import { routedFetch } from './routing.js';
 import { LanPeers, intersectDirection, bindLanTransfers, localNoteProvider, receivePeerNote } from './peers.js';
+import { ReceiveCache } from './resume.js';
 import { desktopFiles } from './desktop.js';
 import {
 	emptyState,
@@ -147,9 +148,14 @@ export function bindManualSyncAction(setting, plugin) {
   if (!live()) return;
   const activity = plugin.cycleActivity;
   const stage = activity ? t(`sync.stage.${activity.stage}`) : '准备同步';
+  const counts = [];
+  if (activity?.scan && Number.isSafeInteger(activity.scan.checked) && Number.isSafeInteger(activity.scan.total))
+   counts.push(t('sync.scanCount', activity.scan));
+  if (activity?.received > 0) counts.push(t('sync.receiveCount', { count: activity.received }));
+  const detail = counts.length ? ` ${counts.join('；')}。` : '';
   status.setText((Date.now() - (activity?.progressAt ?? startedAt)) >= 15000
-   ? `仍在等待：${stage}。可在“同步任务与记录”中查看详情或停止本轮。`
-   : `正在${stage}，请稍候…`);
+   ? `仍在等待：${stage}。${detail}可在“同步任务与记录”中查看详情或停止本轮。`
+   : `正在${stage}，请稍候…${detail}`);
  };
  bindAction(setting, t('msg_36e7a43a1c'), async () => {
   if (!live()) return;
@@ -1741,6 +1747,7 @@ export default class IndependentSync extends Plugin {
 		});
 		const activity = this.cycleActivity ?? this.lastCycleActivity;
 		report.lan = this.lanPeers?.snapshot();
+		report.receiveCache = this.receiveCache?.snapshot();
 		report.timingScope = 'plugin-session';
 		report.timings = structuredClone(this.phaseTimings ?? {});
 		report.pendingDiagnostics = this.data.taskOutbox?.length ?? 0;
@@ -2089,10 +2096,19 @@ export default class IndependentSync extends Plugin {
 				const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
 					? bytes.buffer : Uint8Array.from(bytes).buffer;
 				const options = mtime === undefined ? undefined : { mtime };
+				const changeBefore = this.fileChanges.get(path) ?? 0;
 				if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, buffer, options);
 				else if (existing === null) await this.app.vault.createBinary(path, buffer, options);
 				else throw new Error('A folder occupies the remote note path');
 				await this.refreshPreservedWrite(path, previousTime, mtime);
+				const changeAfter = this.fileChanges.get(path) ?? 0;
+				// Extra edits or missing SDK notifications require ordinary read/hash.
+				if (changeAfter === changeBefore + 1) {
+					const written = this.app.vault.getAbstractFileByPath(path);
+					if (written instanceof TFile && written.stat?.size === bytes.length &&
+						(mtime === undefined || Math.trunc(written.stat.mtime) === mtime) && Number.isFinite(written.stat.ctime))
+						return { stamp: JSON.stringify([written.stat.size, written.stat.mtime, written.stat.ctime, changeAfter]) };
+				}
 			},
 			remove: async (path) => {
 				if (this.stopped) throw new Error('Plugin is unloading');
@@ -2120,6 +2136,12 @@ export default class IndependentSync extends Plugin {
 		const configurationVersion = allowIdleScan ? await scopedHost.configurationVersion?.() ?? (ordinaryOnly ? '[]' : undefined) : undefined;
 		this.contentPriorities ??= new Map();
 		if (!this.contentPriorities.has(connectionId)) this.contentPriorities.set(connectionId, new Map());
+		const receiveCache = new ReceiveCache(this.app.vault.adapter, `${this.app.vault.configDir}/plugins/${this.manifest.id}/resume-v1/${taskScope}`, {
+			active: () => !this.stopped && !api.signal.aborted && new URL(this.data.settings.origin).origin === api.origin && this.data.settings.workspace === api.workspace && this.secret('access') === api.accessKey,
+		});
+		api.resumeCache = receiveCache;
+		this.receiveCache = receiveCache;
+		if (this.lanPeers) this.lanPeers.resumeCache = receiveCache;
 		const engine = new NotebookSynchronizer({
 			contentPriorities: this.contentPriorities.get(connectionId),
 			saveRequired,
@@ -2149,13 +2171,17 @@ export default class IndependentSync extends Plugin {
 				return timers ? abortableYield(api.signal, timers.setImmediate, timers.clearImmediate) : abortableYield(api.signal);
 			},
 			renames: this.data.renames,
-			onProgress: (text) => {
+			onProgress: (text, scan) => {
+				if (this.cycleActivity && Number.isSafeInteger(scan?.checked) && Number.isSafeInteger(scan?.total) && scan.checked >= 0 && scan.total >= scan.checked)
+					this.cycleActivity.scan = { checked: scan.checked, total: scan.total };
 				this.syncStage('scanning');
 				this.setStatus(t('msg_242eab2e90', { text: text }), { overview: this.transferPhase ?? t('overview.scanning') });
 				this.logEvent(text);
 			},
 			onTask: async (event) => {
 				if (this.cycleActivity) this.cycleActivity.changed = true;
+				if (this.cycleActivity && event.direction === 'receive' && event.status === 'done')
+					this.cycleActivity.received = (this.cycleActivity.received ?? 0) + 1;
 				if (event.direction === 'send' || event.direction === 'receive') {
 					this.syncStage(event.direction === 'send' ? 'uploading' : 'receiving');
 					window.clearTimeout(this.backgroundStatusTimer);
@@ -2203,7 +2229,7 @@ export default class IndependentSync extends Plugin {
 			const selection = () => JSON.stringify([this.data.localId, this.data.settings.origin, this.data.settings.workspace, this.data.settings.ignored, this.data.settings.excludedExtensions, this.data.settings.configuration]);
 			const selected = selection();
 			peers.canServe = () => !this.stopped && !api.signal.aborted && selection() === selected && !['paused', 'receive'].includes(this.data.settings.direction);
-			peers.provideNote = localNoteProvider({ keys, workspace: api.workspace, state, host: scopedHost, accepts: path => !engine.excluded(path) });
+			peers.provideNote = localNoteProvider({ keys, workspace: api.workspace, state, host: scopedHost, cache: receiveCache, accepts: path => !engine.excluded(path) });
 			api.peerContents = (note, manifest, info, sinkFor, onTiming) => receivePeerNote(peers, keys, api.workspace, note, manifest, info, sinkFor, onTiming);
 		}
 		return { api, keys, engine, host: scopedHost, pinsSupported: info.notePins === 1 };

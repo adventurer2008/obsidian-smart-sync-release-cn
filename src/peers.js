@@ -260,7 +260,7 @@ export class LanPeers {
 		const deadline = Date.now() + 2000;
 		let attempted = false;
 		for (const link of [...this.links.values()].filter(
-			(link) => link.channel?.readyState === 'open',
+			(link) => link.channel?.readyState === 'open' && !(link.cachePauseUntil > Date.now()),
 		)) {
 			const remaining = deadline - Date.now();
 			if (remaining <= 0) break;
@@ -274,13 +274,17 @@ export class LanPeers {
 	async loadFrom(link, address, timeout) {
 		if (this.pending.size >= 4) return null;
 		const id = crypto.randomUUID();
-		let timer, finish;
+		let timer, finish, settled = false;
 		const signals = [this.api.signal, this.cancellation.signal].filter(Boolean);
 		const abort = () => finish?.(null);
 		const started = Date.now();
 		try {
 			return await new Promise((resolve) => {
 				const done = (value) => {
+					if (settled) return;
+					settled = true;
+					link.cacheMisses = value ? 0 : (link.cacheMisses ?? 0) + 1;
+					if (link.cacheMisses >= 3) link.cachePauseUntil = Date.now() + 2500;
 					window.clearTimeout(timer);
 					this.pending.delete(id);
 					resolve(value);
@@ -389,7 +393,7 @@ export class LanPeers {
 
 // Read only committed, explicitly selected local files. Fresh AES-GCM envelopes
 // retain the cloud-confirmed plaintext digest; no original ciphertext nonce is reused.
-export function localNoteProvider({ keys, workspace, state, host, accepts = () => true }) {
+export function localNoteProvider({ keys, workspace, state, host, cache, accepts = () => true }) {
 	return async (note, manifest, active = () => true) => {
 		const previous = state.notes[note];
 		if (!active() || !previous?.downloaded || previous.removed || (previous.kind ?? 'file') !== 'file' || previous.manifest !== manifest || !accepts(previous.path)) return null;
@@ -397,6 +401,8 @@ export function localNoteProvider({ keys, workspace, state, host, accepts = () =
 		let source, packed;
 		try {
 			const before = await host.stamp?.(path), mtime = await host.mtime?.(path);
+			const reusable = cache && await cache.bundle(manifest, note, before, mtime);
+			if (reusable && active()) return reusable;
 			source = await host.read(path);
 			if (!active() || source === null || await fingerprint(source) !== digest) { await source?.dispose?.(); return null; }
 			if (source.streamed) {
@@ -405,23 +411,34 @@ export function localNoteProvider({ keys, workspace, state, host, accepts = () =
 			}
 			packed = await packNote(keys, workspace, path, source, undefined, note, 'file', mtime);
 			if (!active() || state.notes[note] !== previous || previous.path !== path || previous.manifest !== manifest || previous.digest !== digest || !accepts(path) || (before !== undefined && await host.stamp?.(path) !== before) || (host.mtime && await host.mtime(path) !== mtime)) { await packed.dispose?.(); return null; }
+			if (cache && packed.info.bytes > 8 * 1024 * 1024) await cache.saveBundle(manifest, note, packed, before, mtime, active);
+			if (!active()) { await packed.dispose?.(); return null; }
 			return packed;
 		} catch { await (packed?.dispose?.() ?? source?.dispose?.()); return null; }
 	};
 }
 
 export async function receivePeerNote(peers, keys, workspace, note, manifest, expected, sinkFor, onTiming) {
-	const session = await peers.noteSession(note, manifest);
+	const cache = expected.bytes > 8 * 1024 * 1024 ? peers.resumeCache : undefined;
+	let session = await peers.noteSession(note, manifest);
+	if (!session && cache) {
+		const saved = await cache.readLink('receive', manifest);
+		if (saved?.note === note) session = { address: saved.manifest, load: async () => null, dispose() {} };
+	}
 	if (!session) return null;
 	try {
 		const load = async address => {
+			const cached = cache && await cache.get(address);
+			if (cached) return cached;
 			const bytes = await session.load(address);
 			if (!bytes) throw Error('Peer object unavailable');
+			if (cache) await cache.put(address, bytes);
 			return bytes;
 		};
 		const info = await inspectNote(keys, workspace, note, session.address, load);
 		for (const key of ['path', 'kind', 'bytes', 'digest']) if (info[key] !== expected[key]) throw Error('Peer note differs from cloud revision');
 		if (expected.mtime !== undefined && info.mtime !== expected.mtime) throw Error('Peer modification time differs');
+		if (cache) await cache.writeLink('receive', manifest, { note, manifest: session.address, objects: [session.address, ...info.segments.map(piece => piece.address)] });
 		if (sinkFor) {
 			// A legacy cloud revision without mtime must not borrow the peer's local time.
 			await unpackToSink(keys, workspace, note, session.address, load, (_, bytes, digest) => sinkFor(expected.path, bytes, digest, expected.mtime), info, onTiming);

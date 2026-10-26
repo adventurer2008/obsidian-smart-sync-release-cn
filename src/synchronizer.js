@@ -102,6 +102,7 @@ export class NotebookSynchronizer {
 	#active;
 	#batching = false;
 	#pendingSaves = 0;
+	#pendingBytes = 0;
 	#completed = [];
 	#savedAt = 0;
 	#cachedObjects = new Map();
@@ -126,6 +127,7 @@ export class NotebookSynchronizer {
 		remoteMode = 'both',
 		checkpointSize = 1,
 		checkpointInterval = 500,
+		checkpointBytes = 4 * 1024 * 1024,
 		onTiming,
 		snapshotBeforeSave = true,
 		uploadConcurrency = 1,
@@ -156,6 +158,7 @@ export class NotebookSynchronizer {
 		if (!Number.isInteger(batchBytes) || batchBytes < 256 * 1024 || batchBytes > BATCH_BYTES || !Number.isInteger(batchWaitMs) || batchWaitMs < 0 || batchWaitMs > 1000)
 			throw new Error('Invalid transfer batch bounds');
 		if (!Number.isInteger(batchFiles) || batchFiles < 1 || batchFiles > 128) throw new Error('Invalid transfer batch file count');
+		if (!Number.isSafeInteger(checkpointBytes) || checkpointBytes < 256 * 1024 || checkpointBytes > 256 * 1024 * 1024) throw Error('Invalid checkpoint byte bound');
 		Object.assign(this, {
 			contentPriorities,
 			scanCache,
@@ -163,6 +166,7 @@ export class NotebookSynchronizer {
 			remoteMode,
 			checkpointSize,
 			checkpointInterval,
+			checkpointBytes,
 			onTiming,
 			snapshotBeforeSave,
 			uploadConcurrency,
@@ -384,6 +388,7 @@ export class NotebookSynchronizer {
 		if (
 			!this.#batching ||
 			this.#pendingSaves >= this.checkpointSize ||
+			this.#pendingBytes >= this.checkpointBytes ||
 			Date.now() - this.#savedAt > this.checkpointInterval
 		)
 			await this.#flush();
@@ -393,6 +398,7 @@ export class NotebookSynchronizer {
 		await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state);
 		unsavedStates.delete(this.state);
 		this.#pendingSaves = 0;
+		this.#pendingBytes = 0;
 		this.#savedAt = Date.now();
 		for (const task of this.#completed.splice(0)) await this.onTask({ ...task, checkpointMilliseconds: Math.max(0, performance.now() - task.completedAt) });
 	}
@@ -457,8 +463,6 @@ export class NotebookSynchronizer {
 		// A parent move can update the physical path before this child's manifest.
 		// Delete its tracked location directly; a tombstone must never move it back.
 		if (entry.removed && previous && !previous.removed && previous.downloaded && !this.excluded(previous.path)) info.path = previous.path;
-		delete this.state.localIndex[info.path];
-		if (previous) delete this.state.localIndex[previous.path];
 		this.#active.path = cloudPath;
 		if (
 			this.direction === 'update' &&
@@ -541,7 +545,14 @@ export class NotebookSynchronizer {
 				};
 				return;
 			}
-			const local = await this.host.read(info.path);
+			const inspectedLocal = await this.localFile(info.path);
+			let local = inspectedLocal?.contents ?? (inspectedLocal ? { length: inspectedLocal.size } : null);
+			let localDigest = inspectedLocal?.digest;
+			if (inspectedLocal && !inspectedLocal.contents && (entry.removed || inspectedLocal.digest !== info.digest)) {
+				local = await this.host.read(info.path);
+				localDigest = local === null ? undefined : await fingerprint(local);
+				delete this.state.localIndex[info.path];
+			}
 			if (this.direction === 'update' && (local === null || entry.removed)) {
 				this.state.notes[entry.note] = {
 					path: info.path,
@@ -554,11 +565,11 @@ export class NotebookSynchronizer {
 				};
 				return;
 			}
-			const localDigest = local === null ? undefined : await fingerprint(local);
 			const dirty = local !== null && localDigest !== previous?.digest;
 			if (entry.removed) {
 				if (dirty) await this.#preserve(info.path, local, entry.sequence);
 				if (local !== null) await this.host.remove(info.path);
+				delete this.state.localIndex[info.path];
 				this.state.notes[entry.note] = {
 					path: info.path,
 					revision: entry.sequence,
@@ -568,8 +579,12 @@ export class NotebookSynchronizer {
 				return;
 			}
 			if (local !== null && localDigest === info.digest) {
+				if (!(local instanceof Uint8Array) && info.path.toLowerCase().endsWith('.md') && info.bytes <= 262144) {
+					local = await this.host.read(info.path);
+					if (local === null || await fingerprint(local) !== info.digest) throw Object.assign(new Error('Local content changed during receive'), { code: 'PLAN_CHANGED' });
+				}
 				if (info.mtime !== undefined && this.host.mtime && await this.host.mtime(info.path) !== info.mtime)
-					await this.host.write(info.path, local, info.mtime);
+					await this.host.write(info.path, local instanceof Uint8Array ? local : await this.host.read(info.path), info.mtime);
 				this.state.notes[entry.note] = {
 					path: info.path,
 					revision: entry.sequence,
@@ -579,7 +594,7 @@ export class NotebookSynchronizer {
 					manifest: entry.manifest,
 					origin: info.origin,
 				};
-				rememberBase(this.state, entry.note, local);
+				if (local instanceof Uint8Array) rememberBase(this.state, entry.note, local);
 				return;
 			}
 			let decoded;
@@ -613,6 +628,8 @@ export class NotebookSynchronizer {
 			const wantsBytes =
 				force || info.path.toLowerCase().endsWith('.md') || info.path.startsWith('__smart_sync_configuration__/') || (this.attachmentLimit > 0 && info.bytes <= this.attachmentLimit);
 			if (wantsBytes) {
+				const resumedLoad = info.bytes > 8 * 1024 * 1024 && this.api.resumeCache
+					? this.api.resumeCache.loader(load, info.segments.map(piece => piece.address)) : load;
 				if (
 					this.host.sink &&
 					info.bytes > 8 * 1024 * 1024 &&
@@ -626,7 +643,7 @@ export class NotebookSynchronizer {
 						this.api.workspace,
 						entry.note,
 						entry.manifest,
-						load,
+						resumedLoad,
 						sinkFor,
 						info,
 						this.onTiming,
@@ -635,11 +652,16 @@ export class NotebookSynchronizer {
 					const file =
 						decoded ??
 						(await this.api.peerContents?.(entry.note, entry.manifest, info, undefined, this.onTiming)) ??
-						(await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info, this.onTiming));
+						(await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, resumedLoad, info, this.onTiming));
 					this.assertActive();
-					await this.host.write(info.path, file.contents, info.mtime);
+					const written = await this.host.write(info.path, file.contents, info.mtime);
+					if (typeof written?.stamp === 'string' && this.host.stamp && written.stamp === await this.host.stamp(info.path)) {
+						this.state.localIndex[info.path] = { stamp: written.stamp, digest: info.digest, size: info.bytes };
+						unsavedStates.add(this.state);
+					}
 					decoded = file;
 				}
+				this.#pendingBytes += info.bytes;
 			} else if (local !== null) {
 				// Do not overwrite existing bytes with an attachment placeholder or stale content.
 				await this.host.remove(info.path);
@@ -1052,6 +1074,8 @@ export class NotebookSynchronizer {
 				folderSet.has(path) ? 'folder' : 'file',
 				folderSet.has(path) ? '' : digests.get(path),
 			]);
+		const scanTotal = paths.filter(path => !this.excluded(path)).length;
+		this.onProgress(t('sync.checked', { checked: 0, total: scanTotal }), { checked: 0, total: scanTotal });
 		let checked = 0,
 			lastYield = Date.now();
 		for (const raw of paths) {
@@ -1078,16 +1102,16 @@ export class NotebookSynchronizer {
 			const digest = file.digest;
 			this.assertActive();
 			let found = byPath.get(path);
-			// A parent tombstone may arrive before its children. The still occupied
-			// physical folder belongs to that deletion, rather than a user recreation.
-			if (kind === 'folder' && !found && pendingDeletedFolders.has(path)) continue;
-			if (++checked % 100 === 0) {
-				this.onProgress(t('sync.checked', { checked, total: paths.length }));
+			if (++checked % 100 === 0 || checked === scanTotal) {
+				this.onProgress(t('sync.checked', { checked, total: scanTotal }), { checked, total: scanTotal });
 				if (Date.now() - lastYield >= 16) {
 					await this.yieldWork();
 					lastYield = Date.now();
 				}
 			}
+			// A parent tombstone may arrive before its children. The still occupied
+			// physical folder belongs to that deletion, rather than a user recreation.
+			if (kind === 'folder' && !found && pendingDeletedFolders.has(path)) continue;
 			if (!found) {
 				const aliases = [];
 				if (this.host.sameEntry) for (const candidate of bySpelling.get(path.toLowerCase()) ?? []) {

@@ -65,6 +65,27 @@ async function setup(t, { batch = true, size = 96000, disk = false, unknownTime 
         reads: () => reads, chunks: () => chunks, deny: () => { allowed = false; }, changeStamp: () => { stamp = 'changed'; }, changeTime: () => { fileMtime++; } };
 }
 
+test('local scan progress starts at zero and completes with an eligible total after receiving', async t => {
+    const f = await setup(t), progress = [];
+    f.files.set('ignored/private.bin', new Uint8Array([1]));
+    f.engine.ignored = ['ignored'];
+    f.engine.direction = 'both';
+    f.engine.onProgress = (_, scan) => { if (scan) progress.push(scan); };
+    await f.engine.run();
+    assert.deepEqual(progress, [{ checked: 0, total: 1 }, { checked: 1, total: 1 }]);
+    assert.deepEqual(f.files.get(f.path), f.bytes);
+    assert.equal(f.times.get(f.path), mtime);
+});
+
+test('repeated cache misses briefly bypass raw peer probes and resume probing after the backoff', async t => {
+    const p = pair(t), bytes = new Uint8Array(randomBytes(512)), address = await fingerprint(bytes);
+    for (let i = 0; i < 3; i++) assert.equal(await p.b.load(address), null);
+    const count = p.frames.length;
+    assert.equal(await p.b.load(address), null); assert.equal(p.frames.length, count);
+    p.b.links.get('a').cachePauseUntil = 0; p.a.remember(address, bytes);
+    assert.deepEqual(await p.b.load(address), bytes); assert.equal(p.b.links.get('a').cacheMisses, 0);
+});
+
 test('cold local libraries supply authenticated content to ordinary and batch receive without cloud body downloads', async t => {
     for (const batch of [false, true]) {
         const f = await setup(t, { batch });
