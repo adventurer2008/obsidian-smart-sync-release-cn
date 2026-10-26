@@ -129,6 +129,7 @@ export class PluginSettingTab {
 		this.containerEl = element();
 	}
 }
+export function requireApiVersion() { return typeof PluginSettingTab.prototype.getSettingDefinitions === 'function'; }
 export class Setting {
 	constructor(container) {
 		this.containerEl = container;

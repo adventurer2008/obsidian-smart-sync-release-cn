@@ -1,6 +1,19 @@
 import { base64, unbase64, fingerprint, packNote, inspectNote, unpackNote, unpackToSink } from './codec.js';
 import { withCancellation } from './client.js';
 
+// SDK metadata only: no content reads, hidden caches or synchronization filters.
+export function sampleVaultSize(vault, sampledAt = Date.now()) {
+	try {
+		let bytes = 0;
+		for (const file of vault.getFiles()) {
+			if (!Number.isSafeInteger(file.stat?.size) || file.stat.size < 0) return undefined;
+			bytes += file.stat.size;
+			if (!Number.isSafeInteger(bytes)) return undefined;
+		}
+		return { bytes, sampledAt };
+	} catch { return undefined; }
+}
+
 export function intersectDirection(local, remote) {
 	if (local === 'paused' || remote === 'paused') return 'paused';
 	if (remote === 'both') return local;
@@ -25,9 +38,9 @@ const localSDP = (sdp) =>
 export class LanPeers {
 	constructor(
 		api,
-		{ Peer = window.RTCPeerConnection, period = 2500, enabled = true, onState = () => {} } = {},
+		{ Peer = window.RTCPeerConnection, period = 2500, enabled = true, onState = () => {}, vaultUsage = () => undefined } = {},
 	) {
-		Object.assign(this, { api, Peer, period, enabled, onState });
+		Object.assign(this, { api, Peer, period, enabled, onState, vaultUsage });
 		this.links = new Map();
 		this.cache = new Map();
 		this.cacheBytes = 0;
@@ -66,6 +79,7 @@ export class LanPeers {
 		try {
 			const presence = await this.api.request('POST', 'device-presence', {
 				workspace: this.api.workspace,
+				vaultUsage: this.vaultUsage(this.api),
 			});
 			if (this.closed) return;
 			this.id = presence.id;

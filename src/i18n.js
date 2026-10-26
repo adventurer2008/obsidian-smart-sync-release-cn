@@ -276,6 +276,9 @@ export const messages = {
 	'plan.folder': '{folder}：{count} 项',
 	'plan.details': '查看文件明细',
 	'device.refresh': '刷新设备状态',
+	'device.vaultUsage': '本地笔记库大小：{size} · 统计时间：{time}',
+	'device.vaultUsageUnknown': '本地笔记库大小：暂无数据',
+	'device.vaultUsageHelp': '统计本地笔记和附件的文件大小，不含隐藏配置与缓存；离线设备显示最后上报值。',
 	'storage.refresh': '刷新用量与保留策略',
 	'storage.confirmLabel': '清理确认',
 	'storage.confirmChoose': '请选择',
@@ -421,6 +424,7 @@ export const messages = {
 	msg_4c079853d0: '删除云端',
 	msg_848a148ba5: '保留冲突并处理',
 	msg_dda3f1ce08: '按规则跳过',
+	'configuration.desktopSkipped': '已跳过：仅支持电脑的插件不应用到手机或平板，其余内容继续同步。',
 	msg_02d4e6c7d7: '只更新记录',
 	msg_fb895c45fc: '待同步变更',
 	msg_1b4e8dcd88:
@@ -693,6 +697,7 @@ export const messages = {
 };
 // Draft only: no English language option is released.
 export const englishDraft = {
+	'configuration.desktopSkipped': 'Skipped: desktop-only plugins are not applied on mobile; other content continues syncing.',
 	'notes.recentEnabled': 'Enable recent files',
 	'notes.recentEnabledHelp': 'Use the clock tab in the right sidebar or the Recent files command. Turning this off stops recording opened files.',
 	'notes.noteSearchEnabled': 'Enable note search',
@@ -783,6 +788,9 @@ export const englishDraft = {
 	'plan.folder': '{folder}: {count} items',
 	'plan.details': 'Show file details',
 	'device.refresh': 'Refresh device status',
+	'device.vaultUsage': 'Local vault size: {size} · Measured: {time}',
+	'device.vaultUsageUnknown': 'Local vault size: No data yet',
+	'device.vaultUsageHelp': 'Total local note and attachment file sizes, excluding hidden settings and caches. Offline devices show their last report.',
 	'device.loading': 'Loading devices…',
 	'device.unnamed': 'Name not set',
 	'storage.refresh': 'Refresh usage and retention policy',

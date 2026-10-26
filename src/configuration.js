@@ -167,12 +167,36 @@ export function configurationScope({
 	};
 }
 
-export function configurationHost(vault, normal, scope, { stopped = () => false, onPluginStateChanged = () => {}, windows = false } = {}) {
+export function configurationHost(vault, normal, scope, { stopped = () => false, onPluginStateChanged = () => {}, windows = false, mobileBlocked = [] } = {}) {
 	const adapter = vault.adapter;
 	if (!adapter) return normal;
 	const root = vault.configDir;
 	if (typeof root !== 'string' || !root)
 		throw new Error('Obsidian configuration directory is unavailable');
+	let remoteReader;
+	const mobileManifests = new Map();
+	const pluginManifest = relative => `${root}/${relative.split('/').slice(0, 2).join('/')}/manifest.json`;
+	for (const path of mobileBlocked) {
+		const relative = path.slice(CONFIG_NAMESPACE.length + 1);
+		if (path.startsWith(`${CONFIG_NAMESPACE}/`) && /^plugins\/[a-zA-Z0-9_-]{1,100}\//.test(relative)) mobileManifests.set(pluginManifest(relative), false);
+	}
+	const manifestCompatibility = bytes => {
+		const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+		return value?.isDesktopOnly === true ? false : value?.isDesktopOnly === false ? true : undefined;
+	};
+	async function compatiblePlugin(id) {
+		const relative = `plugins/${id}/manifest.json`, manifest = `${root}/${relative}`;
+		const remote = await remoteReader?.(`${CONFIG_NAMESPACE}/${relative}`);
+		if (remote !== undefined && remote !== null) {
+			const compatible = manifestCompatibility(remote);
+			mobileManifests.set(manifest, compatible);
+			return compatible;
+		}
+		if (mobileManifests.has(manifest)) return mobileManifests.get(manifest);
+		const compatible = await adapter.exists(manifest) ? manifestCompatibility(new TextEncoder().encode(await adapter.read(manifest))) : undefined;
+		mobileManifests.set(manifest, compatible);
+		return compatible;
+	}
 	const pathFor = (path) => `${root}/${safeHostPath(scope.decode(path), windows)}`;
 	const isVirtual = (path) => path.startsWith(`${CONFIG_NAMESPACE}/`);
 	const pluginStatePath = `${root}/community-plugins.json`;
@@ -187,7 +211,11 @@ export function configurationHost(vault, normal, scope, { stopped = () => false,
 		return await adapter.exists(pluginStatePath) ? parsePluginState(new Uint8Array(await adapter.readBinary(pluginStatePath))) : [];
 	}
 	async function writePluginState(bytes) {
-		const incoming = parsePluginState(bytes).filter(id => !scope.protectedPlugin(id));
+		let incoming = parsePluginState(bytes).filter(id => !scope.protectedPlugin(id));
+		if (scope.mobile) {
+			const compatible = await Promise.all(incoming.map(id => compatiblePlugin(id)));
+			incoming = incoming.filter((id, index) => compatible[index] === true);
+		}
 		const previous = await readPluginState();
 		const merged = [...incoming, ...previous.filter(id => scope.protectedPlugin(id))];
 		const encoded = encodePluginState(merged);
@@ -196,7 +224,6 @@ export function configurationHost(vault, normal, scope, { stopped = () => false,
 		await adapter.writeBinary(pluginStatePath, encoded.buffer);
 		onPluginStateChanged();
 	}
-	const mobileManifests = new Map();
 	let configurationFiles;
 	async function listConfiguration(folder) {
 		if (stopped()) throw new DOMException('Configuration scan stopped', 'AbortError');
@@ -244,6 +271,18 @@ export function configurationHost(vault, normal, scope, { stopped = () => false,
 		);
 	}
 	return {
+		setRemoteReader: reader => { remoteReader = reader; },
+		validationContent: path => scope.mobile && (path.endsWith('/manifest.json') && path.startsWith(`${CONFIG_NAMESPACE}/plugins/`)),
+		validateReceive: async (path, bytes) => {
+			if (!scope.mobile || !path.startsWith(`${CONFIG_NAMESPACE}/plugins/`)) return;
+			const relative = scope.decode(path), id = relative.split('/')[1];
+			const compatible = bytes !== undefined && relative.endsWith('/manifest.json')
+				? manifestCompatibility(bytes) : await compatiblePlugin(id);
+			mobileManifests.set(pluginManifest(relative), compatible);
+			if (compatible === false) return 'desktop-plugin';
+			if (compatible !== true) throw Object.assign(Error('Validate the mobile plugin manifest first'), { code: 'CONFIG_MOBILE_PLUGIN' });
+		},
+		excluded: path => scope.mobile && path.startsWith(`${CONFIG_NAMESPACE}/plugins/`) && mobileManifests.get(pluginManifest(path.slice(CONFIG_NAMESPACE.length + 1))) === false,
 		configurationVersion: async () => {
 			configurationFiles = await listConfiguration(root);
 			if (typeof adapter.stat !== 'function') return undefined;
@@ -313,8 +352,16 @@ export function configurationHost(vault, normal, scope, { stopped = () => false,
 			} catch {
 				return null;
 			}
-			if (scope.decode(path) === 'community-plugins.json')
-				return await adapter.exists(target) ? encodePluginState((await readPluginState()).filter(id => !scope.protectedPlugin(id))) : null;
+			if (scope.decode(path) === 'community-plugins.json') {
+				if (!(await adapter.exists(target))) return null;
+				const local = (await readPluginState()).filter(id => !scope.protectedPlugin(id));
+				if (!scope.mobile) return encodePluginState(local);
+				// Keep desktop/unknown enable entries in the shared document without activating them here.
+				const remote = await remoteReader?.(path), ids = remote ? parsePluginState(remote).filter(id => !scope.protectedPlugin(id)) : [];
+				const compatibility = await Promise.all(ids.map(id => compatiblePlugin(id)));
+				const localCompatibility = await Promise.all(local.map(id => compatiblePlugin(id)));
+				return encodePluginState([...ids.filter((id, index) => compatibility[index] !== true), ...local.filter((id, index) => localCompatibility[index] === true)]);
+			}
 			return (await adapter.exists(target))
 				? new Uint8Array(await adapter.readBinary(target))
 				: null;
@@ -346,11 +393,7 @@ export function configurationHost(vault, normal, scope, { stopped = () => false,
 							code: 'CONFIG_MOBILE_PLUGIN',
 						});
 				} else {
-					const manifest = `${root}/${relative.split('/').slice(0, 2).join('/')}/manifest.json`;
-					if (
-						!(await adapter.exists(manifest)) ||
-						JSON.parse(await adapter.read(manifest)).isDesktopOnly !== false
-					)
+					if (await compatiblePlugin(relative.split('/')[1]) !== true)
 						throw Object.assign(new Error('Validate the mobile plugin manifest first'), {
 							code: 'CONFIG_MOBILE_PLUGIN',
 						});

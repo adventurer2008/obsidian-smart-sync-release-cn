@@ -12,6 +12,7 @@ import {
 	Platform,
 	Plugin,
 	PluginSettingTab,
+	requireApiVersion,
 	Setting,
 	TFile,
 	TFolder,
@@ -52,7 +53,7 @@ import {
 } from './pairing.js';
 import { decryptRecovery, encryptRecovery } from './recovery.js';
 import { routedFetch } from './routing.js';
-import { LanPeers, intersectDirection, bindLanTransfers, localNoteProvider, receivePeerNote } from './peers.js';
+import { sampleVaultSize, LanPeers, intersectDirection, bindLanTransfers, localNoteProvider, receivePeerNote } from './peers.js';
 import { ReceiveCache } from './resume.js';
 import { desktopFiles } from './desktop.js';
 import {
@@ -1824,6 +1825,13 @@ export default class IndependentSync extends Plugin {
 				this.peerBinding = binding;
 				this.lanPeers = new LanPeers(api, {
 					enabled: this.data.settings.lanAcceleration !== false,
+					vaultUsage: currentApi => {
+						this.ensureCurrent(currentApi);
+						const now = Date.now();
+						if (!this.deviceVaultSample || now < this.deviceVaultSample.sampledAt || now - this.deviceVaultSample.sampledAt >= 30000)
+							this.deviceVaultSample = sampleVaultSize(this.app.vault, now);
+						return this.deviceVaultSample;
+					},
 				});
 			}
 			const peers = this.lanPeers;
@@ -2123,6 +2131,7 @@ export default class IndependentSync extends Plugin {
 			mobile: Platform.isMobile,
 		});
 		const scopedHost = configurationHost(this.app.vault, host, scope, {
+			mobileBlocked: Object.values(state.notes).filter(note => note.platformSkipped === 'desktop-plugin').map(note => note.path),
 			windows: Platform.isWin === true,
 			stopped: () => this.stopped || api.signal.aborted,
 			onPluginStateChanged: () => { this.pluginStateRestartPending = true; },
@@ -2325,6 +2334,7 @@ export default class IndependentSync extends Plugin {
 	}
 
 	onunload() {
+		this.tab?.disposeLegacySettings?.();
 		this.syncSetupWindow?.close();
 		this.capacityWindow?.close();
 		this.noteEncryption?.dispose();
@@ -3121,6 +3131,7 @@ export default class IndependentSync extends Plugin {
 			area.createEl('p', {
 				text: `${new Date(row.started).toLocaleString(locale)} · ${names[row.direction]} · ${title} · ${states[row.status]} · ${formatStorageSize(row.bytes)}${row.direction === 'send' && row.total ? ` / ${formatStorageSize(row.total)} (${Math.floor((row.bytes / row.total) * 100)}%)` : ''}${row.status === 'running' && row.direction === 'receive' ? t('msg_c1a2a577cd') : ''}`,
 			});
+			if (row.skipReason === 'desktop-plugin') area.createEl('p', { text: this.journal.message(row) });
 			if (this.journal.canRetry(row, this.taskScope)) {
 				area.createEl('p', { text: this.journal.message(row) });
 				action(area, t('msg_a6d7a1c530'), async () => this.synchronize(row));
@@ -3917,6 +3928,11 @@ export default class IndependentSync extends Plugin {
 				const localIdentity = localApi === api ? managingIdentity : await localApi.request('GET', 'account');
 				currentDeviceId = localIdentity.deviceId;
 				await this.updateDeviceLabel(localApi, localIdentity);
+				if (localIdentity.scope && localIdentity.deviceId) {
+					this.ensureCurrent(localApi);
+					const vaultUsage = sampleVaultSize(this.app.vault);
+					if (vaultUsage) await localApi.request('POST', 'device-presence', { workspace: localApi.workspace, vaultUsage });
+				}
 				const result = await api.request('GET', `devices?workspace=${api.workspace}`);
 				this.ensureCurrent(api);
 				entries = result.entries;
@@ -3933,6 +3949,7 @@ export default class IndependentSync extends Plugin {
 				return;
 			}
 			action(container, t('device.refresh'), refresh);
+			container.createEl('p', { text: t('device.vaultUsageHelp') });
 			const revoked = entries.filter(device => device.revoked);
 			const active = entries.some(device => !device.revoked) ? container.createDiv({ cls: 'smart-sync-device-list' }) : undefined;
 			const history = revoked.length ? container.createEl('details', { cls: 'smart-sync-device-history' }) : undefined;
@@ -3953,6 +3970,10 @@ export default class IndependentSync extends Plugin {
 							: t('device.never'),
 					}),
 				});
+				const usage = device.vaultUsage;
+				row.createEl('p', { text: usage && Number.isSafeInteger(usage.bytes) && usage.bytes >= 0 && Number.isSafeInteger(usage.sampledAt) && usage.sampledAt > 0
+					? t('device.vaultUsage', { size: formatStorageSize(usage.bytes), time: new Date(usage.sampledAt).toLocaleString(locale) })
+					: t('device.vaultUsageUnknown') });
 				if (!device.revoked && (device.accountDevice || device.accountDeviceId)) {
 					action(row,t('msg_5faac43bc7'),async()=>{
 						formWindow(this.app,t('notebooks.revokeAccountDevice'),[{key:'confirm',label:t('notebooks.revokeConfirm'),description:t('notebooks.revokeHelp')}],async({confirm})=>{
@@ -4305,10 +4326,48 @@ export default class IndependentSync extends Plugin {
 		}
 	}
 }
-class IndependentSettings extends PluginSettingTab {
+export class IndependentSettings extends PluginSettingTab {
 	constructor(app, plugin) {
 		super(app, plugin);
 		this.owner = plugin;
+	}
+	// CHG-20261026-04: older hosts call display(), newer hosts render the same definitions.
+	disposeLegacySettings() {
+		this.legacyVisible = false;
+		for (const cleanup of this.legacyCleanups ?? []) cleanup();
+		this.legacyCleanups = [];
+	}
+	hide() {
+		this.disposeLegacySettings();
+		super.hide?.();
+	}
+	update() {
+		if (requireApiVersion('1.13.0')) return super.update();
+		if (this.legacyVisible) this.renderLegacySettings();
+	}
+	display() {
+		this.renderLegacySettings();
+	}
+	renderLegacySettings() {
+		this.disposeLegacySettings();
+		this.containerEl.empty();
+		this.legacyVisible = true;
+		const render = (definitions, container, group) => {
+			for (const definition of definitions) {
+				if (definition.type === 'group') {
+					const wrapper = container.createDiv({ cls: definition.cls });
+					const listEl = wrapper.createDiv();
+					render(definition.items, listEl, { listEl });
+					continue;
+				}
+				const setting = new Setting(container).setName(definition.name);
+				if (definition.desc !== undefined) setting.setDesc(definition.desc);
+				const cleanup = definition.render?.(setting, group);
+				if (typeof cleanup === 'function') this.legacyCleanups.push(cleanup);
+			}
+		};
+		try { render(this.getSettingDefinitions(), this.containerEl); }
+		catch (error) { this.disposeLegacySettings(); throw error; }
 	}
 	getSettingDefinitions() {
 		const plugin = this.owner,

@@ -111,6 +111,34 @@ export class NotebookSynchronizer {
 	#queuedUploads = [];
 	#contentPoll;
 	#bulkRemoved = new Set();
+	#remoteHeads = new Map();
+	#remoteFiles = new Map();
+	async #remoteFile(path) {
+		if (this.#remoteFiles.has(path)) return this.#remoteFiles.get(path);
+		this.assertActive();
+		const known = Object.entries(this.state.notes).filter(([, note]) => note.path === path).sort((a, b) => b[1].revision - a[1].revision)[0];
+		const id = known?.[0] ?? await opaqueNoteId(this.keys, path);
+		const previous = known?.[1];
+		let entry = this.#remoteHeads.get(id) ?? (previous?.manifest ? { note: id, manifest: previous.manifest, removed: previous.removed } : undefined);
+		const load = address => this.#load(address);
+		let info = entry && !entry.removed ? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, load) : undefined;
+		if (info?.path !== path) {
+			// Reinstalled or renamed files can have a non-derived identity. Match authenticated paths.
+			entry = undefined;
+			for (const current of this.#remoteHeads.values()) {
+				if (current.removed) continue;
+				const inspected = await inspectNote(this.keys, this.api.workspace, current.note, current.manifest, load);
+				if (inspected.path === path) { entry = current; info = inspected; break; }
+			}
+		}
+		if (!entry || !info || info.path !== path) { this.#remoteFiles.set(path, undefined); return undefined; }
+		const maximum = path.endsWith('/community-plugins.json') ? 1024 * 1024 : 65536;
+		if (info.path !== path || info.kind !== 'file' || info.bytes > maximum) throw Error('Invalid plugin compatibility metadata');
+		const result = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info);
+		this.#remoteFiles.set(path, result.contents);
+		while (this.#remoteFiles.size > 128) this.#remoteFiles.delete(this.#remoteFiles.keys().next().value);
+		return result.contents;
+	}
 	constructor({
 		api,
 		keys,
@@ -242,11 +270,12 @@ export class NotebookSynchronizer {
 		} else { if (Object.hasOwn(this.state.localIndex, path)) unsavedStates.add(this.state); delete this.state.localIndex[path]; }
 		return { digest, size: contents.length, contents, mtime };
 	}
-	excluded(path) {
+	excluded(path, receiving = false) {
 		return (
 			path === 'Smart Sync conflicts' ||
 			path.startsWith('Smart Sync conflicts/') ||
 			!this.accepts(path) ||
+			(!receiving && this.host.excluded?.(path)) ||
 			this.ignored.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
 		);
 	}
@@ -265,6 +294,8 @@ export class NotebookSynchronizer {
 				throw error;
 			})
 			.finally(() => {
+				this.#remoteFiles.clear();
+				this.#remoteHeads.clear();
 				this.#cachedObjects.clear();
 				this.#windowManifests.clear();
 				this.#prefetchedInfo.clear();
@@ -441,6 +472,7 @@ export class NotebookSynchronizer {
 			await this.#receiveCore(entry, force);
 			// The feed loop persists the file and its new cursor together.
 			if (!this.#batching || this.checkpointSize === 1) await this.#persist();
+			if (this.#active.skipReason) return 'skipped';
 			if (!this.#active.path || this.excluded(this.#active.path)) return 'skipped';
 			if (!entry.removed && !this.state.notes[entry.note]?.downloaded) return 'deferred';
 		});
@@ -457,7 +489,16 @@ export class NotebookSynchronizer {
 		const infoKey = entry.note + entry.manifest;
 		const info = this.#prefetchedInfo.get(infoKey) ?? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, load);
 		this.#prefetchedInfo.delete(infoKey);
-		if (this.excluded(info.path)) return;
+		if (this.excluded(info.path, true)) return;
+		this.#active.path = info.path;
+		let decoded;
+		if (!entry.removed && this.host.validationContent?.(info.path)) decoded = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info);
+		const skipReason = await this.host.validateReceive?.(info.path, decoded?.contents);
+		if (skipReason === 'desktop-plugin') {
+			this.#active.skipReason = skipReason;
+			this.state.notes[entry.note] = { path: info.path, kind: info.kind, revision: entry.sequence, digest: info.digest, manifest: entry.manifest, removed: entry.removed, downloaded: false, platformSkipped: skipReason };
+			return;
+		}
 		const previous = this.state.notes[entry.note];
 		const cloudPath = info.path;
 		// A parent move can update the physical path before this child's manifest.
@@ -597,7 +638,6 @@ export class NotebookSynchronizer {
 				if (local instanceof Uint8Array) rememberBase(this.state, entry.note, local);
 				return;
 			}
-			let decoded;
 			if (
 				dirty &&
 				local.length <= 262144 &&
@@ -806,6 +846,7 @@ export class NotebookSynchronizer {
 		return selected.map(([path]) => path);
 	}
 	async #cycle(target, ceiling) {
+		this.host.setRemoteReader?.(path => this.#remoteFile(path));
 		this.#bulkRemoved.clear();
 		const targets = target ? new Set(Array.isArray(target) ? target : [target]) : undefined;
 		if (this.direction === 'paused' || this.remoteMode === 'paused') return;
@@ -840,6 +881,7 @@ export class NotebookSynchronizer {
 			// occupied by the latest files retained across a reconnect. Only each
 			// note's newest validated revision describes the desired remote state.
 			const heads = new Map(changes.map((entry) => [entry.note, entry]));
+			this.#remoteHeads = heads;
 			const current = changes.filter(entry => heads.get(entry.note) === entry);
 			await this.beforeDelete(
 				[...heads.values()].filter(
@@ -859,6 +901,8 @@ export class NotebookSynchronizer {
 						for (const entry of batch.entries) {
 							if (!validEntry(entry, cursor)) throw Error('Invalid change sequence');
 							cursor = entry.sequence;
+							this.#remoteHeads.set(entry.note, entry);
+							this.#remoteFiles.clear();
 							fresh.push(entry);
 						}
 						if (!batch.more) break;
@@ -903,6 +947,13 @@ export class NotebookSynchronizer {
 			// Never persist a cursor beyond an unapplied current revision. Skipped
 			// history after the final applied change needs only one checkpoint.
 			if (replayCursorDirty) await this.#persist();
+		}
+		// A mobile-compatible manifest update can unblock files skipped on an earlier run.
+		for (const [note, value] of Object.entries(this.state.notes)) {
+			if (value.platformSkipped === 'desktop-plugin' && !value.removed && !this.excluded(value.path)) {
+				await this.#receive({ note, manifest: value.manifest, sequence: value.revision, removed: false });
+				await this.#persist();
+			}
 		}
 		await this.#finishTreeDeletions();
 		if (receivedRemovals.size) {
