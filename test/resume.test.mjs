@@ -77,12 +77,15 @@ test('byte checkpoint commits a completed attachment before the next file fails;
  const load = f.api.load;
  f.api.load = address => address === next.manifest ? Promise.reject(Error('synthetic next file failure')) : load(address);
  await assert.rejects(f.engine.run(), /next file failure/);
- assert.equal(f.durable().cursor, 1); assert.equal(f.durable().notes[packed.id].downloaded, true);
+ assert.equal(f.durable().cursor, 2); assert.equal(f.durable().pendingReceives[next.id].sequence, 2); assert.equal(f.durable().notes[packed.id].downloaded, true);
  assert.equal(f.durable().localIndex['attachment.bin'].digest, packed.info.digest);
  // A different local stamp causes a real body read, even with a valid saved digest.
  const restart = receiving(packed, new ReceiveCache(adapter, 'metadata/resume'), { files: f.files, state: f.durable(), direction: 'both' });
+ const restartLoad = restart.api.load, nextObjects = new Map(next.objects.map(object => [object.address, object.body]));
+ restart.api.load = address => nextObjects.get(address) ?? restartLoad(address);
  restart.host.stamp = async () => 'changed-after-restart';
- await restart.engine.run(); assert.equal(restart.localReads(), 1);
+ await restart.engine.run(); assert.equal(restart.localReads(), 3); // Existing attachment plus the retried file before receive and send.
+ assert.deepEqual(restart.files.get('next.bin'), new Uint8Array([1, 2]));
 });
 
 test('storage-full and unsupported adapters retain verified cloud behavior without a false durable-cache claim', async t => {

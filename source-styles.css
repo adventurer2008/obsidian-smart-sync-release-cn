@@ -5,6 +5,39 @@
 	overflow: auto;
 }
 .smart-sync-common { display: flex; flex-wrap: wrap; }
+/* CHG-20261026-09: 1.12.x uses a flat container rather than declarative setting-items. */
+.smart-sync-common:not(.setting-items) { display: block; min-width: 0; }
+.smart-sync-common:not(.setting-items) > .setting-item {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  margin: 0; padding: 12px 0; border: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  border-radius: 0; background: transparent;
+}
+.smart-sync-common:not(.setting-items) > .setting-item .setting-item-info { min-width: 0; }
+.smart-sync-common:not(.setting-items) > .setting-item .setting-item-description { overflow-wrap: anywhere; line-height: 1.6; }
+.smart-sync-common:not(.setting-items) > .setting-item .setting-item-control { max-width: 100%; flex-wrap: wrap; gap: 8px; }
+.smart-sync-common:not(.setting-items) > .setting-item.smart-sync-title { border: 0; padding: 0 0 4px; }
+.smart-sync-common:not(.setting-items) > .smart-sync-title .setting-item-info { padding-left: 64px; min-height: 48px; }
+.smart-sync-common:not(.setting-items) > .smart-sync-title .setting-item-name { font-size: var(--h2-size); }
+.smart-sync-common:not(.setting-items) > .smart-sync-title .setting-item-name::before { width: 48px; height: 48px; }
+.smart-sync-common:not(.setting-items) > .setting-item.smart-sync-version { border: 0; padding: 0 0 12px 64px; }
+.smart-sync-common:not(.setting-items) > .setting-item.smart-sync-overview-status { padding-top: 6px; }
+.smart-sync-common:not(.setting-items) > .setting-item.smart-sync-billing {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  margin: 12px 0; padding: 14px 16px; border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m); background: var(--background-secondary);
+}
+.smart-sync-common:not(.setting-items) > .setting-item.smart-sync-overview-action {
+  display: inline-flex; width: auto; max-width: 100%; padding: 0;
+  margin: 12px 8px 4px 0; border: 0; vertical-align: top;
+}
+.smart-sync-common:not(.setting-items) > .smart-sync-setting-group { display: block; width: 100%; }
+.smart-sync-common:not(.setting-items) > .smart-sync-setting-group .smart-sync-section { width: 100%; box-sizing: border-box; }
+@media (max-width: 650px) {
+  .smart-sync-common:not(.setting-items) > .setting-item { flex-wrap: wrap; gap: 8px; }
+  .smart-sync-common:not(.setting-items) > .setting-item .setting-item-control { justify-content: flex-start; }
+  .smart-sync-common:not(.setting-items) > .setting-item.smart-sync-identity-row .setting-item-control { width: 100%; }
+}
 .setting-items.smart-sync-common > .setting-item { width: 100%; min-width: 0; box-sizing: border-box; order: 4; }
 .setting-items.smart-sync-common > .setting-item.smart-sync-title { border: 0; padding-bottom: 0; order: 0; }
 .smart-sync-title .setting-item-name { font-size: var(--h2-size); }
@@ -217,3 +250,76 @@
 
 .smart-sync-common .smart-sync-manual-action { flex-wrap: wrap; max-width: 100%; }
 .smart-sync-manual-feedback { flex-basis: 100%; margin-top: 0.4rem; font-size: var(--font-ui-small); color: var(--text-muted); overflow-wrap: anywhere; }
+/* CHG-20261026-17: adapt to the plugin pane, including unfolded mobile split views. */
+.smart-sync-common, .smart-sync-dialog, .smart-sync-log-panel {
+  container: wujie / inline-size;
+  min-width: 0;
+  max-width: 100%;
+}
+.smart-sync-common .setting-item, .smart-sync-dialog .setting-item, .smart-sync-log-panel .setting-item {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.smart-sync-common .setting-item-info, .smart-sync-dialog .setting-item-info, .smart-sync-log-panel .setting-item-info {
+  flex: 1 1 15rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.smart-sync-common .setting-item-control, .smart-sync-dialog .setting-item-control, .smart-sync-log-panel .setting-item-control {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.smart-sync-common :is(button, select, input:not([type="checkbox"])),
+.smart-sync-dialog :is(button, select, input:not([type="checkbox"])) {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.smart-sync-common button, .smart-sync-dialog button, .smart-sync-log-panel button {
+  white-space: normal;
+  height: auto;
+  min-height: 2.25rem;
+  line-height: 1.4;
+  padding-block: 0.5rem;
+  overflow-wrap: anywhere;
+}
+.smart-sync-section-description, .smart-sync-section-title { overflow-wrap: anywhere; }
+.smart-sync-task-actions { overflow-x: visible; }
+.smart-sync-task-actions .setting-item-control { flex-wrap: wrap; min-width: 0; }
+.smart-sync-task-actions button { flex: 0 1 auto; max-width: 100%; }
+.smart-sync-device-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+  align-items: start;
+}
+.smart-sync-device-card { min-width: 0; }
+.smart-sync-dialog .smart-sync-pairing-code { max-width: 100%; min-width: 0; }
+.is-mobile :is(.smart-sync-common, .smart-sync-dialog, .smart-sync-log-panel) :is(button, select, input:not([type="checkbox"])),
+.is-mobile .smart-sync-section > summary { min-height: 44px; }
+.is-mobile .smart-sync-dialog { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+@container wujie (max-width: 560px) {
+  .setting-item:not(.smart-sync-billing) > .setting-item-info { flex-basis: 100%; margin-inline-end: 0; }
+  .setting-item:not(.smart-sync-billing) > .setting-item-control { width: 100%; justify-content: flex-start; }
+  .smart-sync-common .smart-sync-scope-choice .setting-item-control { flex-wrap: wrap; flex-shrink: 1; }
+  .smart-sync-section > summary { padding: 0.75rem; }
+  .smart-sync-section > .smart-sync-section-body { padding-inline: 0.75rem; }
+  .smart-sync-conflict-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.smart-sync-common .setting-item-control:empty { display: none; }
+.smart-sync-log-panel { overflow-wrap: anywhere; }
+.smart-sync-common > .smart-sync-setting-group { order: 5; flex: 1 1 100%; width: 100%; min-width: 0; }
+
+.setting-items.smart-sync-common > .setting-item:where(:not(.smart-sync-billing)) {
+  background: transparent; border-radius: 0; margin: 0; padding: 12px 0;
+  border: 0; border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* CHG-20261026-20: keep quick stop immediately beside manual sync. */
+.smart-sync-common .smart-sync-manual-action .setting-item-control { flex-wrap: nowrap; gap: 0.5rem; }

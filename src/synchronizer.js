@@ -224,6 +224,10 @@ export class NotebookSynchronizer {
 			Array.isArray(this.state.localIndex)
 		)
 			{ this.state.localIndex = {}; unsavedStates.add(this.state); }
+		if (state.pendingReceives !== undefined && (!state.pendingReceives || Array.isArray(state.pendingReceives) ||
+			typeof state.pendingReceives !== 'object' || Object.entries(state.pendingReceives).some(([note, entry]) =>
+				note !== entry?.note || !validEntry(entry, 0) || (entry.path !== undefined && safeNotePath(entry.path) !== entry.path))))
+			throw Error('Invalid pending receive state');
 		if (saveRequired) unsavedStates.add(this.state);
 	}
 	async timed(stage, work) {
@@ -279,11 +283,26 @@ export class NotebookSynchronizer {
 			this.ignored.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
 		);
 	}
+	#receivePaths = new Map();
+	#receiveFailures = new Map();
+	#receiveAttempts = new Set();
+	#checkpointFailed = false;
 	run(target, ceiling) {
 		if (this.#running) return this.#running;
+		this.#receivePaths.clear();
+		this.#receiveFailures.clear();
+		this.#receiveAttempts.clear();
+		this.#checkpointFailed = false;
 		this.#batching = true;
 		this.#running = this.#cycle(target, ceiling)
-			.then(() => this.#flush())
+			.then(async () => {
+				await this.#flush();
+				if (this.#receiveFailures.size) {
+					const error = this.#receiveFailures.values().next().value;
+					error.pendingReceiveCount = Object.keys(this.state.pendingReceives ?? {}).length;
+					throw error;
+				}
+			})
 			.catch(async (error) => {
 				unsavedStates.add(this.state);
 				if (this.scanCache) this.scanCache.state = undefined;
@@ -426,7 +445,8 @@ export class NotebookSynchronizer {
 	}
 	async #flush() {
 		if (!unsavedStates.has(this.state) && !this.#completed.length) return;
-		await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state);
+		try { await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state); }
+		catch (error) { this.#checkpointFailed = true; throw error; }
 		unsavedStates.delete(this.state);
 		this.#pendingSaves = 0;
 		this.#pendingBytes = 0;
@@ -448,7 +468,35 @@ export class NotebookSynchronizer {
 		if (!this.state.conflicts.some((entry) => entry.copy === copy))
 			this.state.conflicts.push({ path, copy, sequence });
 	}
+	async #recordReceiveFailure(entry, error) {
+		if (this.#checkpointFailed || this.api.signal?.aborted || error?.name === 'AbortError' ||
+			[401, 403, 409, 410, 429].includes(error?.status) ||
+			(error?.code && !['TEMP_SPACE', 'RENAME_CONFLICT', 'ENOENT', 'EIO', 'ENOSPC', 'EACCES'].includes(error.code))) throw error;
+		const pending = this.state.pendingReceives ??= {};
+		pending[entry.note] = { note: entry.note, sequence: entry.sequence, manifest: entry.manifest, removed: entry.removed,
+			...(this.#receivePaths.get(entry.note) ? { path: this.#receivePaths.get(entry.note) } : {}) };
+		this.#receiveFailures.set(entry.note, error);
+		unsavedStates.add(this.state);
+		// Commit the retry obligation before a later cursor can pass it.
+		await this.#flush();
+	}
 	async #receive(entry, force = false) {
+		const key = entry.note + ':' + entry.sequence;
+		if (this.#batching && this.#receiveAttempts.has(key)) return;
+		if (this.#batching) this.#receiveAttempts.add(key);
+		try {
+			await this.#receiveAttempt(entry, force);
+			if ((this.state.pendingReceives?.[entry.note]?.sequence ?? Infinity) <= entry.sequence) {
+				delete this.state.pendingReceives[entry.note];
+				this.#receiveFailures.delete(entry.note);
+				unsavedStates.add(this.state);
+			}
+		} catch (error) {
+			if (!this.#batching) throw error;
+			await this.#recordReceiveFailure(entry, error);
+		}
+	}
+	async #receiveAttempt(entry, force = false) {
 		const previous = this.state.notes[entry.note];
 		if ((previous?.revision ?? 0) >= entry.sequence && !force) {
 			if (
@@ -491,6 +539,7 @@ export class NotebookSynchronizer {
 		this.#prefetchedInfo.delete(infoKey);
 		if (this.excluded(info.path, true)) return;
 		this.#active.path = info.path;
+		this.#receivePaths.set(entry.note, info.path);
 		let decoded;
 		if (!entry.removed && this.host.validationContent?.(info.path)) decoded = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info);
 		const skipReason = await this.host.validateReceive?.(info.path, decoded?.contents);
@@ -765,7 +814,10 @@ export class NotebookSynchronizer {
 		return Object.values(this.#treeDeletions()).find(tree => tree.members.includes(note));
 	}
 	#heldPath(path) {
-		return Object.values(this.#treeDeletions()).some(tree => path === tree.path || path.startsWith(tree.path + '/'));
+		return Object.values(this.state.pendingReceives ?? {}).some(entry =>
+			[entry.path, this.state.notes[entry.note]?.path].some(held => held &&
+				(path === held || path.startsWith(held + '/') || held.startsWith(path + '/')))) ||
+			Object.values(this.#treeDeletions()).some(tree => path === tree.path || path.startsWith(tree.path + '/'));
 	}
 	async #stageTreeDeletions(changes) {
 		if (!this.host.removeTree || this.direction === 'update') return;
@@ -810,28 +862,34 @@ export class NotebookSynchronizer {
 			const previous = this.state.notes[entry.note];
 			if (entry.removed || !previous?.downloaded || previous.removed || (previous.kind ?? 'file') !== 'file' ||
 				this.#alreadyApplied(entry) || this.excluded(previous.path) || this.#heldPath(previous.path)) continue;
-			this.assertActive();
-			let manifest = this.#windowManifests.get(entry.manifest);
-			if (!manifest && this.batchTransfer && typeof this.api.loadBatch === 'function' && this.batchBytes >= 256 * 1024) {
-				try { manifest = (await this.timed('download', () => this.api.loadBatch([entry.manifest], this.batchBytes - 128 * 1024))).get(entry.manifest); }
-				catch (error) { if ([401, 403].includes(error?.status) || error?.name === 'AbortError') throw error; }
-			}
-			manifest ??= await this.api.load(entry.manifest);
-			const info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async () => manifest);
-			if (manifest.length <= 128 * 1024) {
-				let retained = [...this.#windowManifests.values()].reduce((sum, body) => sum + body.length, 0);
-				for (const [address, body] of this.#windowManifests) {
-					if (retained + manifest.length <= 128 * 1024) break;
-					this.#windowManifests.delete(address); retained -= body.length;
+			if (this.#receiveAttempts.has(entry.note + ':' + entry.sequence)) continue;
+			try {
+				this.assertActive();
+				let manifest = this.#windowManifests.get(entry.manifest);
+				if (!manifest && this.batchTransfer && typeof this.api.loadBatch === 'function' && this.batchBytes >= 256 * 1024) {
+					try { manifest = (await this.timed('download', () => this.api.loadBatch([entry.manifest], this.batchBytes - 128 * 1024))).get(entry.manifest); }
+					catch (error) { if ([401, 403].includes(error?.status) || error?.name === 'AbortError') throw error; }
 				}
-				this.#windowManifests.set(entry.manifest, manifest);
+				manifest ??= await this.api.load(entry.manifest);
+				const info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async () => manifest);
+				if (manifest.length <= 128 * 1024) {
+					let retained = [...this.#windowManifests.values()].reduce((sum, body) => sum + body.length, 0);
+					for (const [address, body] of this.#windowManifests) {
+						if (retained + manifest.length <= 128 * 1024) break;
+						this.#windowManifests.delete(address); retained -= body.length;
+					}
+					this.#windowManifests.set(entry.manifest, manifest);
+				}
+				// Paths and deletions keep their dependency order; only existing file content jumps the queue.
+				if (info.path !== previous.path || info.kind === 'folder' || info.digest === previous.digest) continue;
+				this.#prefetchedInfo.set(entry.note + entry.manifest, info);
+				await this.#receive(entry);
+				await this.#persist();
+				paths.push(previous.path);
+			} catch (error) {
+				this.#receiveAttempts.add(entry.note + ':' + entry.sequence);
+				await this.#recordReceiveFailure(entry, error);
 			}
-			// Paths and deletions keep their dependency order; only existing file content jumps the queue.
-			if (info.path !== previous.path || info.kind === 'folder' || info.digest === previous.digest) continue;
-			this.#prefetchedInfo.set(entry.note + entry.manifest, info);
-			await this.#receive(entry);
-			await this.#persist();
-			paths.push(previous.path);
 		}
 		return paths;
 	}
@@ -880,6 +938,13 @@ export class NotebookSynchronizer {
 			// Read all pages before applying: historical intermediate paths can be
 			// occupied by the latest files retained across a reconnect. Only each
 			// note's newest validated revision describes the desired remote state.
+			const newest = new Map(changes.map(entry => [entry.note, entry.sequence]));
+			const pending = Object.values(this.state.pendingReceives ?? {}).filter(entry =>
+				(newest.get(entry.note) ?? 0) < entry.sequence);
+			if (ceiling !== undefined && pending.some(entry => entry.sequence > ceiling))
+				throw Object.assign(Error('Plan changed'), { code: 'PLAN_CHANGED' });
+			changes.push(...pending);
+			changes.sort((a, b) => a.sequence - b.sequence);
 			const heads = new Map(changes.map((entry) => [entry.note, entry]));
 			this.#remoteHeads = heads;
 			const current = changes.filter(entry => heads.get(entry.note) === entry);
@@ -919,14 +984,18 @@ export class NotebookSynchronizer {
 				const held = this.#heldTree(entry.note);
 				if (held && heads.get(entry.note) === entry) {
 					held.entries[entry.note] = entry;
-					this.state.cursor = entry.sequence;
+					this.state.cursor = Math.max(this.state.cursor, entry.sequence);
 					unsavedStates.add(this.state);
 					await this.#persist();
 					replayCursorDirty = false;
 					continue;
 				}
+				if (this.#alreadyApplied(entry) && (this.state.pendingReceives?.[entry.note]?.sequence ?? Infinity) <= entry.sequence) {
+					delete this.state.pendingReceives[entry.note];
+					this.#receiveFailures.delete(entry.note);
+				}
 				if (heads.get(entry.note) !== entry || this.#alreadyApplied(entry)) {
-					this.state.cursor = entry.sequence;
+					this.state.cursor = Math.max(this.state.cursor, entry.sequence);
 					replayCursorDirty = true;
 					continue;
 				}
@@ -940,11 +1009,11 @@ export class NotebookSynchronizer {
 				await this.#receive(entry);
 				const applied = this.state.notes[entry.note];
 				if (entry.removed && applied?.removed && applied.revision === entry.sequence) receivedRemovals.add(applied.path);
-				this.state.cursor = entry.sequence;
+				this.state.cursor = Math.max(this.state.cursor, entry.sequence);
 				await this.#persist();
 				replayCursorDirty = false;
 			}
-			// Never persist a cursor beyond an unapplied current revision. Skipped
+			// Unapplied revisions remain in the durable retry queue. Skipped
 			// history after the final applied change needs only one checkpoint.
 			if (replayCursorDirty) await this.#persist();
 		}
@@ -970,6 +1039,7 @@ export class NotebookSynchronizer {
 	}
 	async #send(targets, ceiling, version, remoteChanged, priorityPaths) {
 		if (this.#completed.some(task => task.direction === 'receive')) await this.#flush();
+		if (Object.values(this.state.pendingReceives ?? {}).some(entry => !entry.path)) return;
 		const cache = this.scanCache;
 		if (!targets && ceiling === undefined && !remoteChanged && version !== undefined &&
 			!Object.keys(this.renames).length && cache?.state === this.state &&

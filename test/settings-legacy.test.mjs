@@ -5,7 +5,9 @@ import { JSDOM } from 'jsdom';
 registerHooks({ resolve(specifier, context, next) { return specifier === 'obsidian' ? { url: new URL('./settings-dom-sdk.mjs', import.meta.url).href, shortCircuit: true } : next(specifier, context); } });
 globalThis.window = globalThis;
 const { IndependentSettings } = await import('../src/plugin.js');
+const { default: IndependentSync } = await import('../src/plugin.js');
 const { PluginSettingTab } = await import('./obsidian-double.mjs');
+const { Platform } = await import('./obsidian-double.mjs');
 const { cleanConfiguration } = await import('../src/configuration.js');
 
 function fixture(t) {
@@ -48,7 +50,7 @@ test('legacy host renders all shared definitions offline, refreshes and releases
 	const toggle = [...tab.containerEl.querySelectorAll('.setting-item')].flatMap(el => el.setting.controls).find(control => control.kind === 'toggle');
 	await toggle.change(false); assert.equal(plugin.data.settings.autoChanges, false);
 	tab.update(); assert.equal(timers.size, 2); assert.equal(tab.containerEl.querySelector('details').open, true);
-	assert.equal(plugin.statusListeners.size, 2);
+	assert.equal(plugin.statusListeners.size, 3); // Overview, LAN and the adjacent quick-stop state.
 	tab.hide(); assert.equal(timers.size, 0); assert.equal(plugin.statusListeners.size, 0);
 	finishVersion('9.0.0'); await Promise.resolve();
 	tab.containerEl.empty(); tab.update(); assert.equal(tab.containerEl.children.length, 0);
@@ -61,4 +63,31 @@ test('modern host delegates updates to the host without using the legacy rendere
 	t.mock.method(PluginSettingTab.prototype, 'update', () => { updates++; });
 	tab.display = () => assert.fail('modern update must not call legacy display');
 	tab.update(); assert.equal(updates, 1);
+});
+
+test('background tray follows search in Advanced, defaults on, persists changes and is absent on mobile', async t => {
+	const { tab, plugin } = fixture(t);
+	const advanced = tab.getSettingDefinitions().find(group => group.items?.some(item => item.name === '启用搜索'));
+	const searchIndex = advanced.items.findIndex(item => item.name === '启用搜索');
+	assert.equal(advanced.items[searchIndex + 1].name, '后台运行与托盘');
+	tab.display();
+	const row = [...tab.containerEl.querySelectorAll('.setting-item')].find(el => el.setting.name === '后台运行与托盘');
+	const toggle = row.setting.controls.find(control => control.kind === 'toggle');
+	assert.equal(toggle.value, true);
+	await toggle.change(false); assert.equal(plugin.data.settings.backgroundTray, false);
+	Platform.isMobile = true;
+	try { assert.ok(!tab.getSettingDefinitions().some(group => group.items?.some(item => item.name === '后台运行与托盘'))); }
+	finally { Platform.isMobile = false; }
+});
+
+test('tray changes persist before runtime changes; failed storage preserves the active state and synchronization stop', async () => {
+	let refreshed = 0;
+	const plugin = { data: { manualSyncStopped: true, settings: { backgroundTray: true } },
+		saveData: async () => { throw Error('Storage full'); }, refreshBackgroundTray() { refreshed++; } };
+	await assert.rejects(IndependentSync.prototype.setting.call(plugin, 'backgroundTray', false));
+	assert.equal(plugin.data.settings.backgroundTray, true); assert.equal(refreshed, 0);
+	plugin.saveData = async () => {};
+	await IndependentSync.prototype.setting.call(plugin, 'backgroundTray', false);
+	assert.equal(plugin.data.settings.backgroundTray, false); assert.equal(refreshed, 1);
+	assert.equal(plugin.data.manualSyncStopped, true);
 });

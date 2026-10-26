@@ -22,18 +22,27 @@ export function searchHits(text, terms, limit = 80) {
 	return hits;
 }
 
-export function matchNote(note, query, filters = {}) {
-	const terms = searchTerms(query);
-	if (!terms.length) return undefined;
+function inSearchScope(note, filters) {
 	const folder = filters.folder?.replace(/\/$/u, '') ?? '';
-	if (folder && !(filters.recursive === false ? note.folder === folder : note.path.startsWith(folder + '/'))) return undefined;
-	if (filters.tags?.length && !filters.tags.every(tag => note.tags.includes(tag.replace(/^#/u, '')))) return undefined;
-	if (filters.from && note.mtime < filters.from || filters.to && note.mtime > filters.to) return undefined;
-	const titleMatches = terms.every(term => new RegExp(literal(term), 'iu').test(note.title));
-	const target = filters.location === 'title' ? note.title : filters.location === 'body' ? note.body : note.title + '\n' + note.body;
-	if (!terms.every(term => new RegExp(literal(term), 'iu').test(target))) return undefined;
-	return { ...note, rank: note.title.toLowerCase() === terms.join(' ').toLowerCase() ? 0 : titleMatches ? 1 : 2,
-		hits: filters.location === 'title' ? [] : searchHits(note.body, terms) };
+	return !(folder && !(filters.recursive === false ? note.folder === folder : note.path.startsWith(folder + '/')))
+		&& !(filters.tags?.length && !filters.tags.every(tag => note.tags.includes(tag.replace(/^#/u, ''))))
+		&& !(filters.from && note.mtime < filters.from || filters.to && note.mtime > filters.to);
+}
+function prepareMatch(query, filters) {
+	const terms = searchTerms(query), patterns = terms.map(term => new RegExp(literal(term), 'iu'));
+	return note => {
+		if (!terms.length || !inSearchScope(note, filters)) return undefined;
+		const titleMatches = patterns.every(pattern => pattern.test(note.title));
+		const target = filters.location === 'title' ? note.title : filters.location === 'body' ? note.body : note.title + '\n' + note.body;
+		if (!patterns.every(pattern => pattern.test(target))) return undefined;
+		return { ...note, rank: note.title.toLowerCase() === terms.join(' ').toLowerCase() ? 0 : titleMatches ? 1 : 2,
+			hits: filters.location === 'title' ? [] : searchHits(note.body, terms) };
+	};
+}
+export function matchNote(note, query, filters = {}) { return prepareMatch(query, filters)(note); }
+function sortSearchResults(results, filters) {
+	return results.sort((a, b) => (filters.sort === 'title' ? a.title.localeCompare(b.title, 'zh-CN', { numeric: true })
+		: filters.sort === 'modified' ? b.mtime - a.mtime : a.rank - b.rank || b.mtime - a.mtime) || a.path.localeCompare(b.path));
 }
 
 // Read-only, device-local cache. Never serialize note text, queries or results into plugin data.
@@ -53,37 +62,58 @@ export class NoteSearchIndex {
 	}
 	async search(query, filters = {}, cancelled = () => false, progress = () => {}) {
 		const files = this.app.vault.getMarkdownFiles();
-		const revision = this.revision, results = [];
-		let skipped = 0, failed = 0, processed = 0;
-		for (const file of files) {
-			if (cancelled() || revision !== this.revision) return undefined;
-			if (file.stat.size > MAX_FILE_BYTES) { skipped++; processed++; continue; }
-			try {
-				const stamp = `${file.stat.mtime}:${file.stat.ctime}:${file.stat.size}`;
-				let cached = this.cache.get(file.path);
-				if (cached?.stamp !== stamp) {
-					if (cached) { this.bytes -= cached.body.length * 2; this.cache.delete(file.path); }
-					const body = await this.app.vault.cachedRead(file);
-					if (cancelled() || revision !== this.revision) return undefined;
-					cached = { stamp, body: searchableText(body) };
-					if (this.bytes + body.length * 2 <= CACHE_BYTES) { this.cache.set(file.path, cached); this.bytes += body.length * 2; }
-				}
-				const metadata = this.app.metadataCache.getFileCache(file);
-				const frontTags = metadata?.frontmatter?.tags;
-				const tags = [...(metadata?.tags ?? []).map(tag => tag.tag), ...(Array.isArray(frontTags) ? frontTags : typeof frontTags === 'string' ? frontTags.split(/[,\s]+/u) : [])]
-					.filter(tag => typeof tag === 'string').map(tag => tag.replace(/^#/u, ''));
-				const result = matchNote({ path: file.path, title: file.basename, folder: file.parent?.path === '/' ? '' : file.parent?.path ?? '',
-					body: cached.body, mtime: Math.max(this.readTime(file) ?? file.stat.mtime, file.stat.mtime), tags }, query, filters);
-				if (result) results.push(result);
-			} catch { failed++; }
-			processed++;
-			if (processed % 20 === 0) { progress(processed, files.length); await yieldToHost(); }
-		}
-		if (cancelled() || revision !== this.revision) return undefined;
-		results.sort((a, b) => (filters.sort === 'title' ? a.title.localeCompare(b.title, 'zh-CN', { numeric: true })
-			: filters.sort === 'modified' ? b.mtime - a.mtime : a.rank - b.rank || b.mtime - a.mtime) || a.path.localeCompare(b.path));
-		return { results, total: files.length, skipped, failed };
+		const revision = this.revision, results = [], match = prepareMatch(query, filters);
+		let skipped = 0, failed = 0, processed = 0, cursor = 0, reported = 0, lastReport = 0;
+		const stale = () => cancelled() || revision !== this.revision;
+		const report = () => {
+			if (stale()) return;
+			const now = Date.now();
+			if (processed === files.length || !reported || now - lastReport >= 150) {
+				progress(processed, files.length, { results: sortSearchResults([...results], filters).slice(0, PAGE_SIZE), matches: results.length });
+				reported++; lastReport = now;
+			}
+		};
+		const worker = async () => {
+			while (!stale() && cursor < files.length) {
+				const file = files[cursor++];
+				try {
+					const metadata = this.app.metadataCache.getFileCache(file);
+					const frontTags = metadata?.frontmatter?.tags;
+					const tags = [...(metadata?.tags ?? []).map(tag => tag.tag), ...(Array.isArray(frontTags) ? frontTags : typeof frontTags === 'string' ? frontTags.split(/[,\s]+/u) : [])]
+						.filter(tag => typeof tag === 'string').map(tag => tag.replace(/^#/u, ''));
+					const note = { path: file.path, title: file.basename, folder: file.parent?.path === '/' ? '' : file.parent?.path ?? '',
+						body: '', mtime: Math.max(this.readTime(file) ?? file.stat.mtime, file.stat.mtime), tags };
+					if (inSearchScope(note, filters)) {
+						if (filters.location !== 'title') {
+							if (file.stat.size > MAX_FILE_BYTES) { skipped++; }
+							else {
+								const stamp = `${file.stat.mtime}:${file.stat.ctime}:${file.stat.size}`;
+								let cached = this.cache.get(file.path);
+								if (cached?.stamp !== stamp) {
+									if (cached) { this.bytes -= cached.body.length * 2; this.cache.delete(file.path); }
+									const body = await this.app.vault.cachedRead(file);
+									if (stale()) return;
+									cached = { stamp, body: searchableText(body) };
+									if (this.bytes + cached.body.length * 2 <= CACHE_BYTES) { this.cache.set(file.path, cached); this.bytes += cached.body.length * 2; }
+								}
+								note.body = cached.body;
+							}
+						}
+						if (filters.location === 'title' || file.stat.size <= MAX_FILE_BYTES) {
+							const result = match(note);
+							if (result) results.push(result);
+						}
+					}
+				} catch { failed++; }
+				processed++; report();
+				if (processed % 20 === 0) await yieldToHost();
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(4, files.length) }, worker));
+		if (stale()) return undefined;
+		return { results: sortSearchResults(results, filters), total: files.length, skipped, failed };
 	}
+
 }
 
 export class RecentFiles {
@@ -126,7 +156,7 @@ export function registerNoteSearch(owner) {
 	owner.registerView(recentType, leaf => new NoteSearchView(leaf, owner, recentType, true));
 	const openView = async (type, focus) => {
 		if (!enabled(type === recentType)) return;
-		const leaf = owner.app.workspace.getLeavesOfType(type)[0] ?? owner.app.workspace.getRightLeaf(false);
+		const leaf = owner.app.workspace.getLeavesOfType(type)[0] ?? owner.app.workspace.getLeftLeaf(false);
 		if (!leaf) return;
 		await leaf.setViewState({ type, active: true });
 		await owner.app.workspace.revealLeaf(leaf);
@@ -140,7 +170,7 @@ export function registerNoteSearch(owner) {
 	const ensureDefaultView = type => {
 		if (disposed || owner.app.workspace.getLeavesOfType(type).length) return;
 		if (opening.has(type)) return opening.get(type);
-		const leaf = owner.app.workspace.getRightLeaf(false);
+		const leaf = owner.app.workspace.getLeftLeaf(false);
 		if (!leaf) return;
 		const task = leaf.setViewState({ type, active: false }).then(() => {
 			if (disposed || !enabled(type === recentType)) leaf.detach();
@@ -287,10 +317,18 @@ export class NoteSearchView extends ItemView {
 		this.status.setText('正在搜索…');
 		const cancelled = () => this.closed || generation !== this.generation;
 		try {
-			const response = await this.index.search(this.query, filters, cancelled, (done, total) => {
-				if (!cancelled()) this.status.setText(`正在搜索 ${done}/${total} 篇，结果尚未完整。`);
+			let previewKey;
+			const response = await this.index.search(this.query, filters, cancelled, (done, total, partial) => {
+				if (cancelled()) return;
+				this.status.setText(`已找到 ${partial.matches} 篇 · 搜索中 ${done}/${total}`);
+				const key = JSON.stringify(partial.results.map(result => result.path));
+				if (key !== previewKey) {
+					previewKey = key; this.resultsEl.empty();
+					for (const result of partial.results) this.renderResult(result);
+				}
 			});
 			if (!response || cancelled()) return;
+			this.resultsEl.empty();
 			this.status.setText(`${response.failed || response.skipped ? '部分结果：' : ''}找到 ${response.results.length} 篇笔记` +
 				(response.skipped ? `；${response.skipped} 篇超过8 MB，未搜索` : '') + (response.failed ? `；${response.failed} 篇读取失败` : ''));
 			if (response.failed) this.resultsEl.createEl('button', { text: '重试' }).addEventListener('click', () => this.schedule(0));

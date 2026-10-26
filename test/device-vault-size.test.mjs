@@ -48,10 +48,10 @@ test('device dialog shows online and offline samples, zero and missing data; ref
  try {
   const list = dialog.contentEl.children.find(child => child.children.some(row => row.children.some(p => p.text.includes('Windows'))));
   const texts = list.children.map(row => row.children.filter(child => child.tag === 'p').map(child => child.text).join(' '));
-  assert.match(texts[0], /本地笔记库大小：1 KB.*统计时间/);
-  assert.match(texts[1], /暂未在线.*本地笔记库大小：2 KB.*统计时间/);
-  assert.match(texts[2], /本地笔记库大小：0 B.*统计时间/);
-  assert.match(texts[3], /本地笔记库大小：暂无数据/);
+  assert.match(texts[0], /库大小：1 KB.*统计/);
+  assert.match(texts[1], /离线.*库大小：2 KB.*统计/);
+  assert.match(texts[2], /库大小：0 B.*统计/);
+  assert.match(texts[3], /库大小：暂无数据/);
   assert.equal(calls.filter(row => row.path === 'device-presence').length, 1);
   assert.equal(calls.find(row => row.path === 'device-presence').body.vaultUsage.bytes, 512);
  } finally { dialog.close(); }

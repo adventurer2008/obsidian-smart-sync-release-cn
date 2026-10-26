@@ -7,6 +7,7 @@ const args = process.argv.slice(2);
 if (args.length > 1 || args.some(value => !['--edition=cn', '--edition=global', '--all'].includes(value))) throw Error('Use --edition=cn, --edition=global or --all');
 const selections = args[0] === '--all' ? ['cn', 'global'] : args.length ? [args[0].split('=')[1]] : [null];
 const license = (await readFile('LICENSE', 'utf8')).replaceAll('\r\n', '\n');
+const logo = (await readFile('assets/boundless-sync.png')).toString('base64');
 const dependencyNotices = (await readFile('THIRD-PARTY-NOTICES.md', 'utf8')).replaceAll(
 	'\r\n',
 	'\n',
@@ -24,7 +25,10 @@ const result = await build({
 	target: ['es2022', 'safari15.4'],
 	external: ['obsidian', '@codemirror/state', '@codemirror/view'],
 	outfile: `${output}/main.js`,
-	define: config ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...config, development: false }) } : {},
+	define: {
+		...(config ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...config, development: false }) } : {}),
+		__SMART_SYNC_TRAY_LOGO__: JSON.stringify(`data:image/png;base64,${logo}`),
+	},
 	minify: true,
 	metafile: true,
 	banner: { js: `/* Smart Sync protocol 2 test candidate.\n${license}\n${dependencyNotices}\n*/` },
@@ -36,7 +40,6 @@ if (config) {
  await writeFile(`${output}/manifest.json`, JSON.stringify(manifest, null, 2) + '\n');
  await writeFile(`${output}/edition.json`, JSON.stringify(config, null, 2) + '\n');
 } else await copyFile('manifest.json', `${output}/manifest.json`);
-const logo = (await readFile('assets/boundless-sync.png')).toString('base64');
 const styles = (await readFile('source-styles.css', 'utf8')).replace("./assets/boundless-sync.png", `data:image/png;base64,${logo}`);
 await writeFile(`${output}/styles.css`, styles);
 if (config) {

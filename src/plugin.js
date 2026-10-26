@@ -56,6 +56,7 @@ import { routedFetch } from './routing.js';
 import { sampleVaultSize, LanPeers, intersectDirection, bindLanTransfers, localNoteProvider, receivePeerNote } from './peers.js';
 import { ReceiveCache } from './resume.js';
 import { desktopFiles } from './desktop.js';
+import { createBackgroundTray } from './background-tray.js';
 import {
 	emptyState,
 	NotebookSynchronizer,
@@ -113,6 +114,7 @@ class ChoiceWindow extends Modal {
 	onOpen() {
 		this.setTitle(this.heading);
 		this.contentEl.empty();
+		this.contentEl.classList.add('smart-sync-dialog');
 		this.render(this.contentEl);
 	}
 	onClose() {
@@ -141,12 +143,13 @@ export function bindManualSyncAction(setting, plugin) {
  const status = setting.settingEl.createDiv({ cls: 'smart-sync-manual-feedback', attr: { role: 'status', 'aria-live': 'polite' } });
  setting.settingEl.classList.add('smart-sync-manual-action');
  status.hidden = true;
- let disposed = false, timer, startedAt;
+ let disposed = false, timer, startedAt, stopButton, stopping = false;
  const binding = () => JSON.stringify([plugin.data.localId, plugin.data.settings.origin, plugin.data.settings.workspace]);
  const expected = binding();
  const live = () => !disposed && !plugin.stopped && binding() === expected;
  const update = () => {
   if (!live()) return;
+  if (stopping || plugin.stopping) { status.setText(t('task.stateStopping')); return; }
   const activity = plugin.cycleActivity;
   const stage = activity ? t(`sync.stage.${activity.stage}`) : '准备同步';
   const counts = [];
@@ -170,7 +173,29 @@ export function bindManualSyncAction(setting, plugin) {
    throw error;
   } finally { window.clearInterval(timer); timer = undefined; }
  });
- return () => { disposed = true; window.clearInterval(timer); status.remove(); };
+ const refreshStop = () => {
+  if (!live() || !stopButton) return;
+  stopButton.setButtonText(t(stopping || plugin.stopping ? 'task.stateStopping' : 'sync.stop'));
+  stopButton.setDisabled(stopping || Boolean(plugin.stopping) || plugin.data.manualSyncStopped === true);
+ };
+ setting.addButton(button => {
+  stopButton = button;
+  button.onClick(async () => {
+   if (!live() || stopping || plugin.stopping || plugin.data.manualSyncStopped) return;
+   stopping = true; refreshStop(); status.hidden = false; status.setText(t('task.stateStopping'));
+   try {
+    await plugin.stopSynchronization();
+    if (live()) status.setText(t('task.stopped'));
+   } catch (error) {
+    if (live()) status.setText(failureMessage(error));
+    new Notice(failureMessage(error));
+   } finally { stopping = false; refreshStop(); }
+  });
+ });
+ plugin.statusListeners ??= new Set();
+ plugin.statusListeners.add(refreshStop);
+ refreshStop();
+ return () => { disposed = true; window.clearInterval(timer); plugin.statusListeners.delete(refreshStop); status.remove(); };
 }
 function action(container, label, callback) {
 	bindAction(new Setting(container), label, callback);
@@ -277,6 +302,7 @@ class SyncLogView extends ItemView {
 const defaults = () => ({
 	recentEnabled: true,
 	noteSearchEnabled: true,
+	backgroundTray: true,
 	explorerSorting: { enabled: true, grouping: 'files-first', primary: 'mtime-desc', secondary: 'none', folderPrimary: 'name-asc', folderSecondary: 'none', includeUpdated: true },
 	origin: edition.serviceOrigin ?? '',
 	workspace: '',
@@ -718,6 +744,7 @@ export default class IndependentSync extends Plugin {
 		this.logViews = new Set();
 		registerNoteSearch(this);
 		registerNoteEncryption(this);
+		this.refreshBackgroundTray();
 		this.registerView(logViewType, (leaf) => new SyncLogView(leaf, this));
 		this.addRibbonIcon('refresh-cw', t('msg_6dc05b92e9'), async () => {
 			const leaf =
@@ -787,7 +814,7 @@ export default class IndependentSync extends Plugin {
 			});
 		}
 		this.status = this.addStatusBarItem();
-		this.setStatus(t(this.data.settings.direction === 'paused' ? 'msg_c4f91c861a' : 'sync.ready'));
+		this.setStatus(t(this.data.manualSyncStopped ? 'task.stopped' : this.data.settings.direction === 'paused' ? 'msg_c4f91c861a' : 'sync.ready'));
 		this.tab = new IndependentSettings(this.app, this);
 		this.addSettingTab(this.tab);
 		this.addCommand({
@@ -865,6 +892,7 @@ export default class IndependentSync extends Plugin {
 					!this.connecting &&
 					!this.running &&
 					!this.deviceStarting &&
+					!this.data.manualSyncStopped &&
 					!this.lanPeers &&
 					this.data.settings.workspace &&
 					this.secret('access').length >= 32
@@ -884,7 +912,7 @@ export default class IndependentSync extends Plugin {
 			this.data.settings.direction !== 'paused'
 		)
 			this.pendingTimer = window.setTimeout(() => {
-				void this.synchronize();
+				void this.synchronize(undefined, undefined, true);
 			}, 1000);
 		if (this.app.workspace.on)
 			this.registerEvent(
@@ -941,6 +969,14 @@ export default class IndependentSync extends Plugin {
 	}
 	async setting(name, value, configurationReady = false) {
 		if (this.stopped) throw new Error('Plugin is unloaded');
+		if (name === 'backgroundTray') {
+			const previous = this.data.settings.backgroundTray;
+			this.data.settings.backgroundTray = value === true;
+			try { await this.saveData(this.data); }
+			catch (error) { this.data.settings.backgroundTray = previous; throw error; }
+			this.refreshBackgroundTray();
+			return;
+		}
 		if (['recentEnabled', 'noteSearchEnabled'].includes(name)) {
 			const previous = this.data.settings[name];
 			this.data.settings[name] = value === true;
@@ -1154,7 +1190,7 @@ export default class IndependentSync extends Plugin {
 		if (!(file instanceof TFile) || !file.path.toLowerCase().endsWith('.md')) return;
 		const settings = this.data.settings;
 		if (
-			this.stopped ||
+			this.stopped || this.stopping || this.data.manualSyncStopped ||
 			settings.attachmentMiB !== 0 ||
 			settings.direction === 'paused' ||
 			!settings.workspace
@@ -1163,7 +1199,7 @@ export default class IndependentSync extends Plugin {
 		const scope = `${settings.origin}|${settings.workspace}`;
 		if (this.running) await this.running.catch(() => {});
 		if (
-			this.stopped ||
+			this.stopped || this.stopping || this.data.manualSyncStopped ||
 			this.running ||
 			scope !== `${settings.origin}|${settings.workspace}` ||
 			settings.attachmentMiB !== 0 ||
@@ -2277,7 +2313,7 @@ export default class IndependentSync extends Plugin {
 	}
 
 	automaticChangesAllowed(sending = false) {
-		return !this.stopped && !this.stopping && !this.connecting && this.data.settings.workspace &&
+		return !this.stopped && !this.stopping && !this.connecting && !this.data.manualSyncStopped && this.data.settings.workspace &&
 			this.data.settings.autoChanges !== false && this.data.settings.direction !== 'paused' &&
 			(!sending || this.data.settings.direction !== 'receive');
 	}
@@ -2321,7 +2357,7 @@ export default class IndependentSync extends Plugin {
 	}
 	requestChangedSynchronization() {
 		if (!this.automaticChangesAllowed()) return;
-		if (!this.running) { void this.synchronize(); return; }
+		if (!this.running) { void this.synchronize(undefined, undefined, true); return; }
 		const pending = this.running;
 		if (this.changeWait === pending) return;
 		this.changeWait = pending;
@@ -2329,11 +2365,24 @@ export default class IndependentSync extends Plugin {
 		void pending.catch(() => {}).then(() => {
 			if (this.changeWait !== pending) return;
 			this.changeWait = undefined;
-			if (this.automaticChangesAllowed() && !controller.signal.aborted && this.abortController === controller && binding === this.editorBinding()) void this.synchronize();
+			if (this.automaticChangesAllowed() && !controller.signal.aborted && this.abortController === controller && binding === this.editorBinding()) void this.synchronize(undefined, undefined, true);
 		});
 	}
 
+	refreshBackgroundTray() {
+		this.backgroundTray?.dispose();
+		this.backgroundTray = undefined;
+		if (Platform.isMobile || this.stopped || this.data.settings.backgroundTray === false || typeof window.require !== 'function') return;
+		try {
+			this.backgroundTray = createBackgroundTray({
+				load: name => window.require(name), renderer: window, name: edition.name, vaultName: this.app.vault.getName(),
+				labels: { show: t('tray.show'), quit: t('tray.quit') },
+			});
+		} catch { this.notify(t('tray.unavailable')); }
+	}
 	onunload() {
+		this.backgroundTray?.dispose();
+		this.backgroundTray = undefined;
 		this.tab?.disposeLegacySettings?.();
 		this.syncSetupWindow?.close();
 		this.capacityWindow?.close();
@@ -2465,6 +2514,7 @@ export default class IndependentSync extends Plugin {
 		}, 100);
 	}
 	async synchronize(retryRow, approval, automatic = false) {
+		if (automatic && this.data?.manualSyncStopped) return;
 		if (this.stopped) return;
 		if (this.configurationPending) return;
 		if (this.stopping) return;
@@ -2491,6 +2541,14 @@ export default class IndependentSync extends Plugin {
 			let cycle;
 			let diagnosticApi;
 			try {
+				if (!automatic && this.data.manualSyncStopped) {
+					delete this.data.manualSyncStopped;
+					try {
+						if (this.checkpoints) await this.checkpoints.saveConfiguration(this.data);
+						else await this.saveData(this.data);
+					} catch (error) { this.data.manualSyncStopped = true; throw error; }
+					if (this.stopping || this.stopped || this.data.manualSyncStopped) return;
+				}
 				if (this.data.settings.direction === 'paused' && !approval) {
 					this.setStatus(t('msg_c4f91c861a'));
 					if (retryRow) this.notify(t('msg_3ce8632e0d'));
@@ -2619,7 +2677,10 @@ export default class IndependentSync extends Plugin {
 						this.taskSaveFailed = true;
 					});
 				}
-				this.setStatus(t('msg_c0d9fccf36', { value0: failureMessage(error) }), { overview: t('overview.failed') });
+				this.setStatus(error?.pendingReceiveCount
+					? t('sync.partialReceive', { count: error.pendingReceiveCount })
+					: t('msg_c0d9fccf36', { value0: failureMessage(error) }),
+					{ overview: error?.pendingReceiveCount ? t('overview.retryNeeded') : t('overview.failed') });
 			} finally {
 				if (diagnosticApi) await this.flushDiagnostics(diagnosticApi, { automatic });
 				this.refreshTasks();
@@ -2905,6 +2966,7 @@ export default class IndependentSync extends Plugin {
 	async stopSynchronization() {
 		if (this.stopRun) return this.stopRun;
 		this.stopping = true;
+		if (this.data) this.data.manualSyncStopped = true;
 		this.cancelEditorSaves();
 		this.abortController.abort();
 		window.clearTimeout(this.diagnosticTimer);
@@ -2922,9 +2984,13 @@ export default class IndependentSync extends Plugin {
 				await Promise.allSettled([...(this.editorSaveWork?.values() ?? [])]);
 				if (running) {
 					await running.catch(() => {});
-					this.setStatus(t('task.stopped'));
 				}
 				await this.diagnosticRun;
+				if (this.data) {
+					if (this.checkpoints) await this.checkpoints.saveConfiguration(this.data);
+					else await this.saveData(this.data);
+				}
+				this.setStatus(t('task.stopped'));
 			} finally { if (!this.stopped) this.abortController = new AbortController(); this.lastStopMilliseconds = performance.now() - started; this.stopping = false; }
 		})().finally(() => { this.stopRun = undefined; });
 		return this.stopRun;
@@ -3058,7 +3124,6 @@ export default class IndependentSync extends Plugin {
 			await this.persistTasks();
 			this.refreshTasks();
 		});
-		area.createEl('p', { text: t('msg_1202d86812') });
 		const body = area.createDiv();
 		this.taskStatusRows ??= new WeakMap();
 		this.taskStatusRows.set(body, state);
@@ -3067,11 +3132,6 @@ export default class IndependentSync extends Plugin {
 	renderTaskRows(area) {
 		this.taskStatusRows?.get(area)?.setText(t('task.stateLine', { state: this.taskSyncState() }));
 		area.empty();
-		area.createEl('p', {
-			text: t('msg_b4391a4866', {
-				value0: this.diagnosticPending ?? this.data.taskOutbox?.length ?? 0,
-			}),
-		});
 		if (this.taskSaveFailed) area.createEl('p', { text: t('msg_294afd29d6') });
 		const all = this.journal.select(this.taskScope);
 		const cycle = [...all].reverse().find((row) => row.direction === 'cycle');
@@ -3145,6 +3205,14 @@ export default class IndependentSync extends Plugin {
 		bindAction(pagination, t('msg_8a8542f696'), async () => {
 			this.taskPage = (this.taskPage ?? 0) + 1;
 			this.refreshTasks();
+		});
+		const details = area.createEl('details');
+		details.createEl('summary', { text: t('task.recordDetails') });
+		details.createEl('p', { text: t('msg_1202d86812') });
+		details.createEl('p', {
+			text: t('msg_b4391a4866', {
+				value0: this.diagnosticPending ?? this.data.taskOutbox?.length ?? 0,
+			}),
 		});
 	}
 	logEvent(text) {
@@ -3949,7 +4017,6 @@ export default class IndependentSync extends Plugin {
 				return;
 			}
 			action(container, t('device.refresh'), refresh);
-			container.createEl('p', { text: t('device.vaultUsageHelp') });
 			const revoked = entries.filter(device => device.revoked);
 			const active = entries.some(device => !device.revoked) ? container.createDiv({ cls: 'smart-sync-device-list' }) : undefined;
 			const history = revoked.length ? container.createEl('details', { cls: 'smart-sync-device-history' }) : undefined;
@@ -3957,23 +4024,25 @@ export default class IndependentSync extends Plugin {
 			for (const device of [...entries.filter(item => !item.revoked), ...revoked]) {
 				const row = (device.revoked ? history : active).createDiv({ cls: 'smart-sync-device-card' });
 				const current = !device.revoked && (device.id === currentDeviceId || (device.accountDevice && device.id === managingIdentity.deviceId));
-				row.createEl('p', {
+				const deviceInfo = row.createEl('p', {
 					text: t('device.state', {
-						label: `${device.label?.trim() || t('device.unnamed')} · ${device.id.slice(0, 8)}${device.accountDevice ? ` · ${t('notebooks.accountDevice')}` : ''}${current ? ` · ${t('device.current')}` : ''}`,
+						label: `${device.label?.trim() || `${t('device.unnamed')} · ${device.id.slice(0, 8)}`}${current ? ` · ${t('device.current')}` : ''}`,
 						status: device.revoked
 							? t('device.revoked')
 							: device.online
 								? t('device.online')
 								: t('device.offline'),
 						seen: device.lastSeen
-							? new Date(device.lastSeen).toLocaleString(locale)
+							? new Date(device.lastSeen).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 							: t('device.never'),
 					}),
 				});
+				deviceInfo.title = `${device.id}${device.accountDevice ? ` · ${t('notebooks.accountDevice')}` : ''}${device.lastSeen ? ` · ${new Date(device.lastSeen).toLocaleString(locale)}` : ''}`;
 				const usage = device.vaultUsage;
-				row.createEl('p', { text: usage && Number.isSafeInteger(usage.bytes) && usage.bytes >= 0 && Number.isSafeInteger(usage.sampledAt) && usage.sampledAt > 0
-					? t('device.vaultUsage', { size: formatStorageSize(usage.bytes), time: new Date(usage.sampledAt).toLocaleString(locale) })
+				const sizeInfo = row.createEl('p', { text: usage && Number.isSafeInteger(usage.bytes) && usage.bytes >= 0 && Number.isSafeInteger(usage.sampledAt) && usage.sampledAt > 0
+					? t('device.vaultUsage', { size: formatStorageSize(usage.bytes), time: new Date(usage.sampledAt).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) })
 					: t('device.vaultUsageUnknown') });
+				sizeInfo.title = `${t('device.vaultUsageHelp')}${usage?.sampledAt ? ` · ${new Date(usage.sampledAt).toLocaleString(locale)}` : ''}`;
 				if (!device.revoked && (device.accountDevice || device.accountDeviceId)) {
 					action(row,t('msg_5faac43bc7'),async()=>{
 						formWindow(this.app,t('notebooks.revokeAccountDevice'),[{key:'confirm',label:t('notebooks.revokeConfirm'),description:t('notebooks.revokeHelp')}],async({confirm})=>{
@@ -4904,6 +4973,12 @@ export class IndependentSettings extends PluginSettingTab {
 						try { await plugin.setting(key, value); }
 						catch { plugin.notify(t('notes.saveFailed')); this.update(); }
 					})))),
+				...(!Platform.isMobile ? [row(t('tray.enabled'), setting => setting
+					.setDesc(t('tray.help'))
+					.addToggle(input => input.setValue(config.backgroundTray !== false).onChange(async value => {
+						try { await plugin.setting('backgroundTray', value); }
+						catch { plugin.notify(t('notes.saveFailed')); this.update(); }
+					})))] : []),
 				...advancedItems,
 			]),
 		];
