@@ -364,3 +364,68 @@
   white-space: nowrap;
 }
 .is-mobile .smart-sync-common .smart-sync-manual-feedback { flex: 0 0 auto; }
+
+/* CHG-20261027-13: keep overview content inset when rows use zero inline padding. */
+.setting-items.smart-sync-common,
+.smart-sync-common:not(.setting-items) {
+  box-sizing: border-box;
+  padding-inline: clamp(16px, 3vw, 24px);
+}
+
+/* Wide mobile panes can use the same compact rows as desktop; split panes still stack. */
+@container wujie (min-width: 560px) {
+  .is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) {
+    flex-direction: row;
+    align-items: center;
+  }
+  .is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) > .setting-item-info {
+    flex: 1 1 0;
+    width: auto;
+  }
+  .is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) > .setting-item-control {
+    flex: 0 1 auto;
+    width: auto;
+    max-width: 60%;
+    justify-content: flex-end;
+  }
+  .is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action {
+    display: inline-flex;
+    flex: 0 1 auto;
+    width: auto;
+    margin: 0 0.5rem 0.75rem 0;
+    padding: 0;
+    border: 0;
+  }
+  .is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action > .setting-item-control {
+    max-width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* CHG-20261027-14: compact action groups wrap together without empty full-width rows. */
+.smart-sync-common > .setting-item.smart-sync-overview-action,
+.is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action {
+  display: inline-flex;
+  flex: 0 1 auto;
+  width: auto;
+  margin: 4px 8px 8px 0;
+  padding: 0;
+  border: 0;
+  vertical-align: top;
+}
+.smart-sync-common > .setting-item.smart-sync-overview-action > .setting-item-control,
+.is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action > .setting-item-control {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 100%;
+  justify-content: flex-start;
+  gap: 8px;
+}
+.smart-sync-common > .setting-item.smart-sync-overview-action button {
+  padding-inline: 12px;
+  white-space: nowrap;
+}
+.is-mobile .smart-sync-common > .setting-item.smart-sync-identity-row {
+  padding-block: 8px;
+  row-gap: 6px;
+}

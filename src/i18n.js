@@ -2,7 +2,7 @@ import { edition } from './edition.js';
 const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 export const locale = edition.locale;
 const failures = {
-	SYNC_BUSY: '当前正在同步。请等待本轮结束，或在“同步任务与记录”中停止本轮后再操作。',
+	SYNC_BUSY: '当前正在同步。请等待本轮结束，或在“同步记录”中停止本轮后再操作。',
 	CONFIGURATION_BUSY: '同步范围正在保存，请稍后重试。',
 	PIN_SERVICE_UPGRADE: '置顶状态已保存在本机，需更新同步服务后才能跨设备同步。',
 	EDITION_ALREADY_ACTIVE: '此笔记库已启用另一版本的同步插件。请先停用它，再启用当前版本。',
@@ -119,7 +119,7 @@ export const messages = {
 	'overview.receiving': '正在接收版本',
 	'overview.synced': '已同步',
 	'overview.retryNeeded': '有任务待重试',
-	'overview.failed': '同步未完成，请查看同步任务与记录',
+	'overview.failed': '同步未完成，请查看同步记录',
 	'overview.statusSpace': '{state}\n服务端占用：{server}\n本地笔记库：{local}',
 	'overview.spaceUnknown': '暂未获取',
 	'overview.spaceMiB': '{value} MB',
@@ -382,7 +382,7 @@ export const messages = {
 	'conflict.binary': '文件缺失、为二进制或超过64 KB，请使用适合的工具核对，原文件未改变。',
 	'conflict.resolved': '此冲突已处理；若选择本机内容，仍需同步到云端。',
 	msg_31fbef1625: '继续',
-	msg_6dc05b92e9: '同步任务与记录',
+	msg_6dc05b92e9: '同步记录',
 	msg_0b72b4fc33: '我的笔记库',
 	msg_4439f34880: '重命名记录保存失败，将根据内容指纹重试。',
 	msg_c4f91c861a: '同步已暂停',
@@ -402,7 +402,7 @@ export const messages = {
 	msg_23bf159dfc: '退出当前账号',
 	msg_a7a1b0977a: '删除账号云端数据',
 	msg_92757d2798: '本机同步预设',
-	msg_4933e1a72c: '打开同步任务与记录',
+	msg_4933e1a72c: '打开同步记录',
 	msg_17490b0825: '操作未完成，请检查连接设置后重试。',
 	msg_bea1edccdc: '请等待当前同步结束。',
 	msg_b9909135b2: '连接笔记库：登录 → 选择 → 同步',

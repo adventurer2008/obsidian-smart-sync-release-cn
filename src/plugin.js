@@ -159,7 +159,7 @@ export function bindManualSyncAction(setting, plugin) {
   if (activity?.received > 0) counts.push(t('sync.receiveCount', { count: activity.received }));
   const detail = counts.length ? ` ${counts.join('；')}。` : '';
   status.setText((Date.now() - (activity?.progressAt ?? startedAt)) >= 15000
-   ? `仍在等待：${stage}。${detail}可在“同步任务与记录”中查看详情或停止本轮。`
+   ? `仍在等待：${stage}。${detail}可在“同步记录”中查看详情或停止本轮。`
    : `正在${stage}，请稍候…${detail}`);
  };
  bindAction(setting, t('msg_36e7a43a1c'), async () => {
@@ -168,7 +168,7 @@ export function bindManualSyncAction(setting, plugin) {
   timer = window.setInterval(update, 1000);
   try {
    await plugin.requestSynchronization();
-   if (live()) status.setText(plugin.overviewStatusText ?? '本次操作已结束，请查看同步任务与记录或按弹窗提示继续。');
+   if (live()) status.setText(plugin.overviewStatusText ?? '本次操作已结束，请查看同步记录或按弹窗提示继续。');
   } catch (error) {
    if (live()) status.setText(`同步未完成：${failureMessage(error)}`);
    throw error;
