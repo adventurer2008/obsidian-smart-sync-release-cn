@@ -75,6 +75,47 @@ test('integrated overview preserves all identity and synchronization routes and 
 	for (const cleanup of cleanups) cleanup();
 });
 
+test('reusing the native device setting across refreshes keeps only one pairing instruction', t => {
+	const { tab, plugin } = fixture(t);
+	const setting = new Setting(tab.containerEl);
+	for (const workspace of ['synthetic', '']) {
+		plugin.data.settings.workspace = workspace;
+		const overview = tab.getSettingDefinitions().find(item => item.cls === 'smart-sync-overview-group');
+		const definition = overview.items.find(item => item.name === '同步设备');
+		for (let refresh = 0; refresh < 4; refresh++) {
+			definition.render(setting);
+			assert.equal(setting.settingEl.querySelectorAll('.smart-sync-pair-help').length, 1);
+		}
+		const help = setting.settingEl.querySelector('.smart-sync-pair-help').textContent;
+		assert.match(help, workspace ? /新设备获取六位码.*添加设备.*批准/ : /已经连接的设备批准/);
+	}
+});
+
+test('reusing the native LAN row replaces old details and displays only the current connection state', t => {
+	const { tab, plugin, timers } = fixture(t);
+	plugin.data.settings.workspace = 'synthetic';
+	let state = '暂无直连，使用云端';
+	plugin.lanSummary = details => details ? `${state}；回退 3 次` : state;
+	const setting = new Setting(tab.containerEl);
+	let dispose;
+	for (let refresh = 0; refresh < 4; refresh++) {
+		dispose?.();
+		const overview = tab.getSettingDefinitions().find(item => item.cls === 'smart-sync-overview-group');
+		const definition = overview.items.find(item => item.name === '局域网连接状态');
+		state = refresh ? '已直连 2 台设备' : '暂无直连，使用云端';
+		dispose = definition.render(setting);
+		const details = setting.settingEl.querySelectorAll('.smart-sync-lan-details');
+		assert.equal(details.length, 1);
+		assert.equal(details[0].querySelector('.smart-sync-lan-state').textContent, state);
+		if (refresh) assert.equal(details[0].open, true);
+		details[0].open = true;
+		if (refresh) assert.doesNotMatch(setting.settingEl.textContent, /暂无直连/);
+		assert.equal(timers.size, 1);
+	}
+	dispose(); assert.equal(timers.size, 0);
+	assert.equal(setting.settingEl.querySelectorAll('.smart-sync-lan-details').length, 0);
+});
+
 test('legacy host renders all shared definitions offline, refreshes and releases listeners/timers', async t => {
 	const { tab, plugin, timers } = fixture(t);
 	let finishVersion;

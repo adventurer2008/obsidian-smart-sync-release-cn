@@ -51,12 +51,13 @@ test('closing keeps this vault alive; branded icon restores minimized windows an
 	assert.equal(f.contents.listenerCount('will-prevent-unload'), 0);
 });
 
-test('explicit vault close, application quit and system shutdown bypass interception; cancelled unload permits background use', () => {
+test('explicit vault close, application quit and system shutdown bypass interception; tray restoration resumes background use after deferred unload', () => {
 	for (const quit of [f => f.menu()[2].click(), f => f.app.quit(), f => f.win.emit('query-session-end'), f => f.win.emit('session-end')]) {
 		const f = fixture(), controller = f.open();
 		quit(f); assert.equal(f.close(), false);
 		assert.equal(f.unload(), false);
-		f.contents.emit('will-prevent-unload'); assert.equal(f.close(), true);
+		f.contents.emit('will-prevent-unload'); assert.equal(f.close(), false);
+		f.tray().emit('click'); assert.equal(f.close(), true);
 		controller.dispose();
 	}
 });
@@ -125,9 +126,48 @@ test('cancelled or failed vault close restores background interception without q
 	assert.equal(f.win.closeCalls, 1);
 	assert.equal(f.win.visible, true);
 	f.contents.emit('will-prevent-unload');
+	assert.equal(f.close(), false);
+	f.tray().emit('click');
 	assert.equal(f.close(), true);
 	f.win.close = () => { throw Error('Host close failed'); };
 	assert.throws(() => f.menu()[2].click(), /Host close failed/);
 	assert.equal(f.close(), true);
 	controller.dispose();
+});
+
+
+test('host save deferral keeps explicit close intent through retry and removes only its tray before renderer disappears', () => {
+ const app = new EventEmitter(), first = fixture({ app }), second = fixture({ app });
+ const one = first.open(), two = second.open();
+ first.close(); second.close();
+ let saveComplete;
+ first.win.close = () => {
+  assert.equal(first.close(), false);
+  assert.equal(first.unload(), false);
+  // Obsidian prevents the first unload to await workspace save promises.
+  first.contents.emit('will-prevent-unload');
+  saveComplete = () => {
+   assert.equal(first.close(), false, 'host save retry must not be hidden back to tray');
+   assert.equal(first.unload(), false);
+   // Remote closed callbacks can no longer execute after renderer teardown.
+   first.renderer.dispatchEvent(new Event('pagehide'));
+   assert.equal(first.tray().destroyed, true);
+  };
+ };
+ first.menu()[2].click();
+ assert.notEqual(first.tray().destroyed, true, 'do not remove reachability while save is pending');
+ saveComplete();
+ assert.notEqual(second.tray().destroyed, true);
+ assert.equal(second.close(), true);
+ second.tray().emit('click'); assert.equal(second.win.visible, true);
+ one.dispose(); two.dispose();
+});
+
+test('successful renderer unload cleans tray even without a deliverable remote closed callback', () => {
+ const f = fixture(), controller = f.open();
+ f.menu()[2].click();
+ f.renderer.dispatchEvent(new Event('unload'));
+ assert.equal(f.tray().destroyed, true);
+ assert.equal(f.app.listenerCount('before-quit'), 0);
+ controller.dispose();
 });

@@ -234,7 +234,7 @@
 .setting-item.smart-sync-billing.is-compact { align-items: center; padding-block: 12px; }
 .smart-sync-billing.is-compact .setting-item-name { font-size: var(--font-ui-medium); font-weight: 600; color: var(--text-normal); }
 .smart-sync-plan-badge { float: right; padding: 2px 8px; border-radius: 20px; background: var(--background-modifier-hover); color: var(--text-muted); font-size: var(--font-ui-smaller); }
-.smart-sync-plan-title { margin-block: 14px 10px; font-size: var(--font-ui-large); font-weight: 600; }
+.smart-sync-plan-title { margin-block: 14px 10px; font-size: var(--font-ui-large); font-weight: 600; text-wrap:balance; overflow-wrap:anywhere; }
 .smart-sync-plan-usage, .smart-sync-plan-expiry { margin-block: 7px; font-size: var(--font-ui-small); }
 .smart-sync-plan-progress { display: block; width: 100%; height: 7px; accent-color: var(--interactive-accent); }
 .smart-sync-plan-progress[hidden] { display: none; }
@@ -398,18 +398,20 @@
 .smart-sync-settings-page > .setting-group, .setting-group.smart-sync-overview-group { max-width:100%; }
 .smart-sync-common.smart-sync-layout-root { padding:0; background:transparent; border:0; }
 .smart-sync-overview-group { flex:1 1 100%; width:100%; min-width:0; order:2; margin:16px 0; }
-.smart-sync-common.smart-sync-overview-card { --setting-items-divider-width:0; --setting-items-border-width:0; display:flex; flex-wrap:wrap; padding:20px 20px 0; margin:0; gap:0; border:1px solid var(--background-modifier-border); border-radius:14px; background:var(--background-primary); box-sizing:border-box; }
+.smart-sync-common.smart-sync-overview-card { --setting-items-divider-width:0; --setting-items-border-width:0; display:flex; flex-wrap:wrap; padding:20px 20px 0; margin:0; gap:0 8px; border:1px solid var(--background-modifier-border); border-radius:14px; background:var(--background-primary); box-sizing:border-box; }
 .smart-sync-common.smart-sync-overview-card > .setting-item { background:transparent; border:0; border-radius:0; margin:0; min-width:0; box-sizing:border-box; }
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row { display:flex; flex-direction:row; flex-wrap:wrap; align-items:center; flex:1 1 100%; width:100%; padding:0; margin:0 0 16px; gap:8px 16px; order:0; }
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-info { display:flex; flex-direction:column; align-items:flex-start; align-self:center; flex:1 1 9rem; width:auto; min-width:0; margin:0; padding:0; }
 .smart-sync-overview-card .smart-sync-identity-row .setting-item-name { color:var(--text-muted); font-size:var(--font-ui-smaller); font-weight:var(--font-normal); margin:0; white-space:normal; }
 .smart-sync-overview-card .smart-sync-identity-row .setting-item-description { display:block; margin:4px 0 0; font-size:var(--font-ui-medium); color:var(--text-normal); line-height:1.5; white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; }
-.smart-sync-overview-card .smart-sync-library-row .setting-item-description { font-size:20px; font-weight:var(--font-semibold); }
+.smart-sync-overview-card .smart-sync-library-row .setting-item-description { font-size:var(--font-ui-large); font-weight:var(--font-semibold); }
 .smart-sync-overview-card .smart-sync-account-row .setting-item-description { font-size:var(--font-ui-small); }
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-control { flex:0 1 auto; width:auto; max-width:100%; min-width:0; margin:0; gap:12px; justify-content:flex-end; }
 .smart-sync-overview-card .smart-sync-identity-row button { background:transparent; box-shadow:none; border:0; border-radius:6px; color:var(--text-muted); font-size:var(--font-ui-small); padding:6px 2px; min-height:40px; }
 .smart-sync-overview-card .smart-sync-identity-row button:hover { color:var(--text-normal); background:var(--background-modifier-hover); }
-.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-devices-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 12px; margin:0; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-devices-row { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:4px 12px; margin:0; }
+.smart-sync-overview-card .smart-sync-devices-row .setting-item-name { white-space:nowrap; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-devices-row > .setting-item-control { justify-self:end; flex-wrap:wrap; }
 .smart-sync-overview-card .smart-sync-devices-row .setting-item-description { display:none; }
 .smart-sync-overview-card .smart-sync-pair-help { grid-column:1/-1; width:100%; min-width:0; margin:0; font-size:var(--font-ui-smaller); line-height:1.6; color:var(--text-muted); overflow-wrap:anywhere; }
 .smart-sync-common.smart-sync-overview-card > .smart-sync-overview-status { flex:1 1 100%; width:100%; padding:0; margin:18px 0 14px; order:1; }
@@ -419,10 +421,11 @@
 .smart-sync-status-phase { display:inline-block; max-width:100%; padding:3px 8px; border-radius:6px; color:var(--text-normal); background:var(--background-secondary); font-size:var(--font-ui-smaller); overflow-wrap:anywhere; }
 .smart-sync-status-phase.is-synced { color:var(--color-green); background:rgba(57,135,78,.09); }
 .smart-sync-status-storage { font-size:var(--font-ui-smaller); color:var(--text-muted); overflow-wrap:anywhere; }
-.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-overview-action { display:inline-flex; flex-direction:row; flex-wrap:wrap; flex:0 0 auto; width:auto; max-width:100%; margin:0 0 18px 8px; padding:0; border:0; order:2; }
-.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action { flex:1 1 12rem; margin-inline-start:0; min-width:0; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-overview-action { display:inline-flex; flex-direction:row; flex-wrap:wrap; align-self:flex-start; align-items:flex-start; flex:0 0 auto; width:auto; max-width:100%; margin:0 0 14px; padding:0; border:0; order:2; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action { flex:1 1 calc(6 * var(--font-ui-small) + 40px); min-width:0; }
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-overview-action > .setting-item-control { display:flex; flex-wrap:wrap; flex:1 1 auto; width:100%; max-width:100%; margin:0; gap:8px; }
-.smart-sync-overview-card .smart-sync-overview-action button { min-height:44px; height:auto; padding:9px 12px; border:1px solid var(--background-modifier-border); border-radius:8px; box-shadow:none; background:var(--background-primary); color:var(--text-normal); white-space:nowrap; }
+.smart-sync-overview-card .smart-sync-overview-action button { min-height:44px; height:auto; font-size:var(--font-ui-small); padding:9px 8px; border:1px solid var(--background-modifier-border); border-radius:8px; box-shadow:none; background:var(--background-primary); color:var(--text-normal); white-space:nowrap; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control { flex-wrap:nowrap; }
 .smart-sync-overview-card .smart-sync-manual-action button.mod-cta { flex:1 1 auto; background:var(--interactive-accent); color:var(--text-on-accent); border-color:var(--interactive-accent); }
 .smart-sync-overview-card .smart-sync-manual-feedback { flex:0 0 100%; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:1 1 auto; }
@@ -432,7 +435,21 @@
 .smart-sync-common.smart-sync-layout-root > .setting-item.smart-sync-billing { width:100%; margin:0 0 16px; padding:18px 20px; border:1px solid var(--background-modifier-border); border-radius:14px; background:var(--background-primary); }
 .is-mobile .smart-sync-overview-card .smart-sync-identity-row button { min-height:44px; }
 @container wujie (min-width:640px) {
-  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action { flex:0 1 auto; }
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:0 1 180px; min-width:180px; }
+}
+/* CHG-20261027-22: reserve full-value rows and let actions wrap at enlarged mobile text sizes. */
+@container wujie (max-width:639px) {
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) { gap:2px 8px; margin-bottom:14px; }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) > .setting-item-info { display:contents; }
+  .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-name { flex:0 0 auto; white-space:nowrap; }
+  .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-description { flex:1 1 100%; order:1; margin:0; }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) > .setting-item-control { flex:0 0 auto; margin-inline-start:auto; }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-control button { white-space:nowrap; }
+}
+/* Keep whole device actions readable on very narrow foldable covers with enlarged text. */
+@container wujie (max-width:319px) {
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-devices-row { grid-template-columns:minmax(0,1fr); }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-devices-row > .setting-item-control { justify-self:stretch; justify-content:flex-end; }
+  .smart-sync-overview-card .smart-sync-devices-row button { flex-shrink:0; }
 }
 @media(max-width:370px) { .smart-sync-common.smart-sync-overview-card { padding:16px 16px 0; } .smart-sync-common.smart-sync-overview-card > .smart-sync-lan-status { width:calc(100% + 32px); margin-inline:-16px; padding-inline:16px; } }

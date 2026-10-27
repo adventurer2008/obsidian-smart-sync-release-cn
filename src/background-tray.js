@@ -15,6 +15,8 @@ export function createBackgroundTray({ load, name, vaultName, labels, renderer, 
 	const alive = () => !disposed && !win.isDestroyed();
 	const show = () => {
 		if (!alive()) return;
+		// Explicitly restoring the window abandons any pending close request.
+		quitting = false;
 		if (win.isMinimized()) win.restore();
 		win.show(); win.focus(); hidden = false;
 	};
@@ -34,7 +36,8 @@ export function createBackgroundTray({ load, name, vaultName, labels, renderer, 
 		win.hide(); hidden = true;
 	};
 	const beforeQuit = () => { quitting = true; };
-	const quitCancelled = () => { quitting = false; };
+	// A prevented unload can mean the host is still saving and will close again.
+	// Keep the close intent until teardown, failure, or explicit tray restoration.
 	const contents = win.webContents;
 	const priorThrottle = contents?.getBackgroundThrottling?.();
 	const dispose = () => {
@@ -43,15 +46,18 @@ export function createBackgroundTray({ load, name, vaultName, labels, renderer, 
 		if (hidden && !quitting) show();
 		disposed = true;
 		renderer.removeEventListener('beforeunload', beforeUnload, true);
+		renderer.removeEventListener('pagehide', finishUnload, true);
+		renderer.removeEventListener('unload', finishUnload, true);
+		// Destroy while this renderer can still call into the main process.
+		if (tray && !tray.isDestroyed()) tray.destroy();
 		win.removeListener('close', close);
 		win.removeListener('closed', dispose);
 		win.removeListener('session-end', beforeQuit);
 		win.removeListener('query-session-end', beforeQuit);
-		contents?.removeListener('will-prevent-unload', quitCancelled);
 		remote.app.removeListener('before-quit', beforeQuit);
 		if (priorThrottle !== undefined && !contents.isDestroyed()) contents.setBackgroundThrottling(priorThrottle);
-		if (tray && !tray.isDestroyed()) tray.destroy();
 	};
+	const finishUnload = () => { quitting = true; dispose(); };
 	try {
 		const image = remote.nativeImage.createFromDataURL(logo);
 		if (image.isEmpty()) throw Error('Tray logo is unavailable');
@@ -61,7 +67,7 @@ export function createBackgroundTray({ load, name, vaultName, labels, renderer, 
 			{ label: labels.show, click: show },
 			{ type: 'separator' },
 			{ label: labels.quit, click: () => {
-				if (!alive()) return;
+				if (!alive() || quitting) return;
 				// Close this vault through the host's normal unload/save path.
 				// app.quit() would close every vault sharing the Electron process.
 				show();
@@ -75,10 +81,11 @@ export function createBackgroundTray({ load, name, vaultName, labels, renderer, 
 		remote.app.on('before-quit', beforeQuit);
 		win.on('session-end', beforeQuit);
 		win.on('query-session-end', beforeQuit);
-		contents?.on('will-prevent-unload', quitCancelled);
 		win.on('close', close);
 		win.on('closed', dispose);
 		renderer.addEventListener('beforeunload', beforeUnload, true);
+		renderer.addEventListener('pagehide', finishUnload, true);
+		renderer.addEventListener('unload', finishUnload, true);
 		if (priorThrottle !== undefined) contents.setBackgroundThrottling(false);
 		return { dispose };
 	} catch (error) { dispose(); throw error; }
