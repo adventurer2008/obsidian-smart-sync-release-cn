@@ -85,6 +85,8 @@ test('peer object frames verify the complete digest, reject corruption and relea
 	a.remember(address, body);
 	assert.deepEqual(await b.load(address), body);
 	assert.equal(b.pending.size, 0);
+	// Force a fresh request rather than the newly reusable verified local cache.
+	b.cache.clear(); b.cacheBytes = 0;
 	a.cache.set(address, new Uint8Array(body.length));
 	assert.equal(await b.load(address), null);
 	a.cache.clear();

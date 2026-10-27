@@ -3,8 +3,7 @@ import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { createBackgroundTray } from '../src/background-tray.js';
 
-function fixture({ failMenu = false, empty = false } = {}) {
-	const app = new EventEmitter();
+function fixture({ failMenu = false, empty = false, app = new EventEmitter() } = {}) {
 	const renderer = new EventTarget();
 	const contents = Object.assign(new EventEmitter(), {
 		throttled: true, getBackgroundThrottling() { return this.throttled; },
@@ -27,7 +26,8 @@ function fixture({ failMenu = false, empty = false } = {}) {
 			destroy() { this.destroyed = true; }
 		},
 	};
-	app.quit = () => { app.emit('before-quit'); };
+	app.quit ??= () => { app.emit('before-quit'); };
+	win.close = () => { win.closeCalls = (win.closeCalls ?? 0) + 1; win.emit('close', { preventDefault() {} }); };
 	const open = (load = () => remote) => createBackgroundTray({ load, renderer, name: 'Brand', vaultName: 'Synthetic vault',
 		labels: { show: 'Show', quit: 'Quit' }, logo: 'data:image/png;base64,synthetic' });
 	const close = () => { let prevented = false; win.emit('close', { preventDefault() { prevented = true; } }); return prevented; };
@@ -51,8 +51,8 @@ test('closing keeps this vault alive; branded icon restores minimized windows an
 	assert.equal(f.contents.listenerCount('will-prevent-unload'), 0);
 });
 
-test('explicit quit and system shutdown bypass close interception; a cancelled unload permits later background use', () => {
-	for (const quit of [f => f.menu()[2].click(), f => f.win.emit('query-session-end'), f => f.win.emit('session-end')]) {
+test('explicit vault close, application quit and system shutdown bypass interception; cancelled unload permits background use', () => {
+	for (const quit of [f => f.menu()[2].click(), f => f.app.quit(), f => f.win.emit('query-session-end'), f => f.win.emit('session-end')]) {
 		const f = fixture(), controller = f.open();
 		quit(f); assert.equal(f.close(), false);
 		assert.equal(f.unload(), false);
@@ -92,4 +92,42 @@ test('controllers isolate vaults, support legacy remote, and clean up when the v
 	one.dispose(); assert.equal(second.close(), true);
 	second.win.emit('closed'); assert.equal(second.tray().destroyed, true);
 	two.dispose();
+});
+
+
+test('tray close affects only its vault in a shared application and releases only its own tray', () => {
+	const app = new EventEmitter();
+	let appQuits = 0;
+	app.quit = () => { appQuits++; app.emit('before-quit'); };
+	const first = fixture({ app }), second = fixture({ app });
+	const one = first.open(), two = second.open();
+	first.close(); second.close();
+	first.win.close = () => {
+		assert.equal(first.close(), false);
+		assert.equal(first.unload(), false);
+		first.win.emit('closed');
+	};
+	first.menu()[2].click();
+	assert.equal(appQuits, 0);
+	assert.equal(first.tray().destroyed, true);
+	assert.notEqual(second.tray().destroyed, true);
+	assert.equal(second.win.visible, false);
+	assert.equal(second.close(), true);
+	assert.equal(second.unload(), true);
+	second.tray().emit('click');
+	assert.equal(second.win.visible, true);
+	one.dispose(); two.dispose();
+});
+
+test('cancelled or failed vault close restores background interception without quitting the app', () => {
+	const f = fixture(), controller = f.open();
+	f.close(); f.menu()[2].click();
+	assert.equal(f.win.closeCalls, 1);
+	assert.equal(f.win.visible, true);
+	f.contents.emit('will-prevent-unload');
+	assert.equal(f.close(), true);
+	f.win.close = () => { throw Error('Host close failed'); };
+	assert.throws(() => f.menu()[2].click(), /Host close failed/);
+	assert.equal(f.close(), true);
+	controller.dispose();
 });

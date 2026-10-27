@@ -7,6 +7,7 @@ globalThis.window = globalThis;
 const { IndependentSettings } = await import('../src/plugin.js');
 const { default: IndependentSync } = await import('../src/plugin.js');
 const { PluginSettingTab } = await import('./obsidian-double.mjs');
+const { Setting } = await import('./settings-dom-sdk.mjs');
 const { Platform } = await import('./obsidian-double.mjs');
 const { cleanConfiguration } = await import('../src/configuration.js');
 
@@ -28,12 +29,51 @@ function fixture(t) {
 	t.mock.method(window, 'clearInterval', id => timers.delete(id));
 	const plugin = { data: { localId: 'synthetic', settings: { origin: 'https://example.invalid', workspace: '', direction: 'both', interval: 60, excludedExtensions: [], configuration: cleanConfiguration({}) } },
 		manifest: { version: '1.0.5' }, status: { text: 'Disconnected' }, secret: () => '', registerInterval() {},
-		lanSummary: () => 'Offline', checkClientVersion: async () => undefined, statusListeners: new Set(),
+		lanSummary: (details = false) => details ? '局域网已收 1 KB · 回退 3 次' : 'Offline', checkClientVersion: async () => undefined, statusListeners: new Set(),
 		setting: async (key, value) => { plugin.data.settings[key] = value; } };
 	const tab = new IndependentSettings({}, plugin); tab.containerEl = dom.window.document.querySelector('main');
 	t.after(() => { tab.hide(); dom.window.close(); });
 	return { tab, plugin, timers };
 }
+
+test('integrated identity retains the full account value without a separate reveal action', t => {
+	const { tab, plugin } = fixture(t);
+	plugin.secret = key => key === 'account' ? 'synthetic-account-key' : '';
+	plugin.accountEmail = 'a-very-long-synthetic-account@example.invalid';
+	const flatten = items => items.flatMap(item => item.items ? flatten(item.items) : [item]);
+	const definition = flatten(tab.getSettingDefinitions()).find(item => item.name === '当前账号');
+	const setting = new Setting(tab.containerEl);
+	const info = setting.settingEl.createDiv({ cls: 'setting-item-info' });
+	const description = info.createDiv({ cls: 'setting-item-description' });
+	setting.setDesc = text => { description.textContent = text; return setting; };
+	const dispose = definition.render(setting);
+	assert.equal(description.textContent, plugin.accountEmail);
+	assert.equal(info.title, plugin.accountEmail);
+	assert.equal(info.hasAttribute('role'), false);
+	dispose();
+});
+
+test('integrated overview preserves all identity and synchronization routes and pairing guidance', async t => {
+	const { tab, plugin } = fixture(t), calls = [];
+	plugin.data.settings.workspace = 'synthetic';
+	for (const method of ['signOut', 'manageNotebooks', 'devices', 'addDevice', 'requestSynchronization', 'stopSynchronization', 'logs'])
+		plugin[method] = async () => { calls.push(method); };
+	const definitions = tab.getSettingDefinitions();
+	const overview = definitions.find(item => item.cls === 'smart-sync-overview-group');
+	assert.deepEqual(overview.items.slice(0, 3).map(item => item.name), ['当前笔记库', '当前账号', '同步设备']);
+	assert.ok(!overview.items.some(item => item.name === '同步方向'));
+	assert.ok(definitions.find(item => item.name === '同步偏好').items.some(item => item.name === '同步方向'));
+	const cleanups = [];
+	for (const name of ['当前笔记库', '当前账号', '同步设备', '立即同步', '同步记录']) {
+		const definition = overview.items.find(item => item.name === name), setting = new Setting(tab.containerEl);
+		const cleanup = definition.render(setting, { listEl: tab.containerEl });
+		if (cleanup) cleanups.push(cleanup);
+		for (const control of setting.controls) if (control.kind === 'button') await control.click();
+	}
+	assert.match(tab.containerEl.querySelector('.smart-sync-pair-help').textContent, /新设备获取六位码.*添加设备.*批准/);
+	assert.deepEqual(calls, ['manageNotebooks', 'signOut', 'devices', 'addDevice', 'requestSynchronization', 'stopSynchronization', 'logs']);
+	for (const cleanup of cleanups) cleanup();
+});
 
 test('legacy host renders all shared definitions offline, refreshes and releases listeners/timers', async t => {
 	const { tab, plugin, timers } = fixture(t);
@@ -43,13 +83,24 @@ test('legacy host renders all shared definitions offline, refreshes and releases
 	const count = definitions.reduce((sum, item) => sum + (item.items?.length ?? 1), 0);
 	tab.display();
 	assert.equal(tab.containerEl.querySelectorAll('.setting-item').length, count);
-	assert.equal(tab.containerEl.querySelectorAll('details').length, definitions.filter(item => item.type === 'group').length);
+	assert.equal(tab.containerEl.querySelectorAll('details.smart-sync-section').length, definitions.filter(item => item.type === 'group' && item.cls === 'smart-sync-setting-group').length);
+	const connectionDetails = tab.containerEl.querySelector('details.smart-sync-lan-details');
+	assert.equal(connectionDetails.open, false);
+	assert.equal(connectionDetails.querySelector('.smart-sync-lan-title').textContent, '局域网连接状态');
+	assert.equal(connectionDetails.querySelector('.smart-sync-lan-state').textContent, 'Offline');
+	assert.equal(connectionDetails.querySelector('.smart-sync-lan-entry').textContent, '连接详情');
+	assert.match(connectionDetails.textContent, /局域网已收 1 KB.*回退 3 次/);
+	connectionDetails.open = true;
+	connectionDetails.dispatchEvent(new connectionDetails.ownerDocument.defaultView.Event('toggle'));
+	assert.equal(tab.containerEl.querySelectorAll('.smart-sync-overview-card').length, 1);
+	assert.match(tab.containerEl.querySelector('.smart-sync-pair-help').textContent, /批准/);
 	assert.ok(count > 50); assert.equal(timers.size, 2);
-	const first = tab.containerEl.querySelector('details'); first.open = true;
+	const first = tab.containerEl.querySelector('details.smart-sync-section'); first.open = true;
 	first.dispatchEvent(new first.ownerDocument.defaultView.Event('toggle'));
 	const toggle = [...tab.containerEl.querySelectorAll('.setting-item')].flatMap(el => el.setting.controls).find(control => control.kind === 'toggle');
 	await toggle.change(false); assert.equal(plugin.data.settings.autoChanges, false);
-	tab.update(); assert.equal(timers.size, 2); assert.equal(tab.containerEl.querySelector('details').open, true);
+	tab.update(); assert.equal(timers.size, 2); assert.equal(tab.containerEl.querySelector('details.smart-sync-section').open, true);
+	assert.equal(tab.containerEl.querySelector('details.smart-sync-lan-details').open, true);
 	assert.equal(plugin.statusListeners.size, 3); // Overview, LAN and the adjacent quick-stop state.
 	tab.hide(); assert.equal(timers.size, 0); assert.equal(plugin.statusListeners.size, 0);
 	finishVersion('9.0.0'); await Promise.resolve();

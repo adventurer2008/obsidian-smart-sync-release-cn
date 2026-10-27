@@ -60,7 +60,15 @@ export function createBackgroundTray({ load, name, vaultName, labels, renderer, 
 		tray.setContextMenu(remote.Menu.buildFromTemplate([
 			{ label: labels.show, click: show },
 			{ type: 'separator' },
-			{ label: labels.quit, click: () => { quitting = true; remote.app.quit(); } },
+			{ label: labels.quit, click: () => {
+				if (!alive()) return;
+				// Close this vault through the host's normal unload/save path.
+				// app.quit() would close every vault sharing the Electron process.
+				show();
+				quitting = true;
+				try { win.close(); }
+				catch (error) { quitting = false; throw error; }
+			} },
 		]));
 		tray.on('click', show);
 		tray.on('double-click', show);

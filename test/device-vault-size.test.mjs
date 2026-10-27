@@ -49,6 +49,8 @@ test('device dialog shows online and offline samples, zero and missing data; ref
   const list = dialog.contentEl.children.find(child => child.children.some(row => row.children.some(p => p.text.includes('Windows'))));
   const texts = list.children.map(row => row.children.filter(child => child.tag === 'p').map(child => child.text).join(' '));
   assert.match(texts[0], /库大小：1 KB.*统计/);
+  assert.doesNotMatch(texts[0], /活跃/);
+  assert.equal((texts[0].match(/统计/g) ?? []).length, 1);
   assert.match(texts[1], /离线.*库大小：2 KB.*统计/);
   assert.match(texts[2], /库大小：0 B.*统计/);
   assert.match(texts[3], /库大小：暂无数据/);

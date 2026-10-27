@@ -167,6 +167,90 @@ test('batch peer hits survive sender backpressure without spilling the second ob
     assert.deepEqual(result.get(first), bytes); assert.deepEqual(result.get(second), other);
 });
 
+test('concurrent mobile object requests wait through brief sender backpressure instead of using cloud', async t => {
+    const p = pair(t), bodies = Array.from({ length: 4 }, () => new Uint8Array(randomBytes(96000)));
+    const addresses = await Promise.all(bodies.map(fingerprint));
+    addresses.forEach((address, i) => p.a.remember(address, bodies[i]));
+    p.left.channel.bufferedAmount = 131073;
+    const drain = setTimeout(() => { p.left.channel.bufferedAmount = 0; }, 40);
+    t.after(() => clearTimeout(drain));
+    const api = { load: async () => assert.fail('all four objects are available on LAN'), store: async () => {} };
+    bindLanTransfers(api, p.b);
+    const received = await Promise.all(addresses.map(address => api.load(address)));
+    assert.deepEqual(received, bodies);
+    assert.equal(p.b.metrics.fallbacks, 0); assert.equal(p.b.metrics.cloudBytes, 0);
+    assert.equal(p.b.pending.size, 0); assert.equal(p.left.serveWaiters, 0);
+    // A verified LAN receipt can be reused even after the source goes away.
+    const frames = p.frames.length; p.b.remove('a');
+    assert.deepEqual(await api.load(addresses[0]), bodies[0]);
+    assert.equal(p.frames.length, frames); assert.equal(p.b.metrics.cloudBytes, 0);
+});
+
+test('a phone and iPad sharing one source wait briefly and keep both authenticated LAN sessions', async t => {
+    const f = await setup(t), provider = f.a.provideNote;
+    const ipad = new LanPeers({ workspace }), errors = [];
+    ipad.mode = 'both';
+    const link = id => ({ id, notes: true, pc: { close() {} }, channel: {
+        readyState: 'open', bufferedAmount: 0, close() { this.readyState = 'closed'; }
+    } });
+    const sourceLink = link('ipad'), ipadLink = link('source');
+    sourceLink.channel.send = raw => queueMicrotask(() => ipad.message(ipadLink, raw).catch(error => errors.push(error)));
+    ipadLink.channel.send = raw => queueMicrotask(() => f.a.message(sourceLink, raw).catch(error => errors.push(error)));
+    f.a.links.set('ipad', sourceLink); ipad.links.set('source', ipadLink);
+    t.after(() => { ipad.close(); assert.deepEqual(errors, []); });
+    let calls = 0;
+    f.a.provideNote = async (...args) => {
+        calls++; await new Promise(resolve => setTimeout(resolve, 35)); return provider(...args);
+    };
+    const results = await Promise.all([f.b, ipad].map(receiver => receivePeerNote(receiver, keys, workspace,
+        f.packed.id, f.packed.manifest, f.packed.info)));
+    for (const result of results) {
+        assert.ok(result); assert.equal(result.path, f.path); assert.deepEqual(result.contents, f.bytes);
+    }
+    assert.equal(calls, 2);
+    assert.equal(f.b.metrics.fallbacks, 0); assert.equal(f.b.metrics.failures, 0);
+    assert.equal(ipad.metrics.fallbacks, 0); assert.equal(ipad.metrics.failures, 0);
+    await tick(); assert.equal(f.a.bundles.size, 0);
+});
+
+test('persistent sender contention still falls back to cloud with bounded waiting', async t => {
+    const p = pair(t), bytes = new Uint8Array(randomBytes(1024)), address = await fingerprint(bytes);
+    p.a.remember(address, bytes); p.left.sending = true;
+    let cloud = 0;
+    const api = { load: async () => { cloud++; return bytes; }, store: async () => {} };
+    bindLanTransfers(api, p.b);
+    const started = Date.now();
+    assert.deepEqual(await api.load(address), bytes);
+    assert.ok(Date.now() - started < 2000); assert.equal(cloud, 1);
+    assert.equal(p.b.metrics.fallbacks, 1); assert.equal(p.left.serveWaiters, 0);
+});
+
+test('stopping or restricting a sender while preparation is queued prevents late content reads', async t => {
+    for (const stop of [f => { f.a.enabled = false; }, f => { f.a.canServe = () => false; }, f => { f.a.close(); }]) {
+        const f = pair(t); let reads = 0;
+        f.a.preparing = true;
+        f.a.provideNote = async () => { reads++; assert.fail('queued preparation must not start'); };
+        const pending = f.b.noteSession('a'.repeat(64), 'b'.repeat(64));
+        await tick(); stop(f); f.a.preparing = false;
+        // Close the remote end as a real channel closure would do.
+        if (f.a.closed) f.b.remove('a');
+        assert.equal(await pending, null); assert.equal(reads, 0);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(f.left.serveWaiters, 0); assert.equal(f.a.bundles.size, 0);
+    }
+});
+
+test('receiver cancellation releases queued preparation before the sender reads local content', async t => {
+    const f = pair(t), controller = new AbortController(); let reads = 0;
+    f.b.api = { signal: controller.signal }; f.a.preparing = true;
+    f.a.provideNote = async () => { reads++; assert.fail('cancelled request must not prepare content'); };
+    const pending = f.b.noteSession('a'.repeat(64), 'b'.repeat(64)); await tick();
+    assert.equal(f.a.queuedNotes.size, 1); controller.abort();
+    assert.equal(await pending, null); await tick(); f.a.preparing = false;
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(reads, 0); assert.equal(f.a.queuedNotes.size, 0); assert.equal(f.a.bundles.size, 0);
+});
+
 test('disabling during note preparation cancels the lease and disposes late encrypted packages', async t => {
     const f = pair(t); let resolve, disposed = 0;
     f.a.provideNote = () => new Promise(done => { resolve = done; });

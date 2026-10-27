@@ -46,6 +46,7 @@ export class LanPeers {
 		this.cacheBytes = 0;
 		this.pending = new Map();
 		this.bundles = new Map();
+		this.queuedNotes = new Map();
 		this.preparing = false;
 		this.metrics = { receivedBytes: 0, sentBytes: 0, cloudBytes: 0, receivedObjects: 0, fallbacks: 0, failures: 0 };
 		this.after = 0;
@@ -177,6 +178,21 @@ export class LanPeers {
 			this.cacheBytes -= value.length;
 		}
 	}
+	async reserveServe(link, acquire, active = () => true) {
+		// Brief contention is not a cache miss. Bound both waiting work and time,
+		// and claim capacity inside the loop so concurrent waiters cannot race.
+		if ((link.serveWaiters ?? 0) >= 4) return false;
+		link.serveWaiters = (link.serveWaiters ?? 0) + 1;
+		const deadline = Date.now() + 500;
+		try {
+			do {
+				if (this.closed || !this.enabled || this.mode !== 'both' || this.api.signal?.aborted || this.canServe?.() === false || link.channel?.readyState !== 'open' || !active()) return false;
+				if (acquire()) return true;
+				await delay(10);
+			} while (Date.now() < deadline);
+			return false;
+		} finally { link.serveWaiters--; }
+	}
 	async message(link, raw) {
 		if (typeof raw !== 'string' || raw.length > 65536) throw Error('Invalid peer frame');
 		const frame = JSON.parse(raw);
@@ -192,25 +208,29 @@ export class LanPeers {
 		if (frame.type === 'get') {
 			if (!/^[a-f0-9]{64}$/.test(frame.address)) throw Error('Invalid ciphertext address');
 			if (this.closed || !this.enabled || this.mode !== 'both' || this.canServe?.() === false) return;
-			let bytes = this.cache.get(frame.address);
-			if (!bytes) for (const bundle of this.bundles.values()) {
-				if (bundle.peer !== link.id || bundle.cancelled || !bundle.objects?.has(frame.address)) continue;
-				this.touchBundle(bundle);
-				const object = bundle.objects.get(frame.address);
-				bytes = object.body ?? await object.load();
-				if (bundle.cancelled || this.closed || !this.enabled || this.mode !== 'both' || this.canServe?.() === false) return;
-				break;
-			}
-			if (!bytes) {
-				link.channel.send(JSON.stringify({ type: 'miss', id: frame.id }));
+			const reserved = await this.reserveServe(link, () => {
+				if (link.sending) return false;
+				link.sending = true; return true;
+			});
+			if (!reserved) {
+				if (link.channel.readyState === 'open') link.channel.send(JSON.stringify({ type: 'miss', id: frame.id }));
 				return;
 			}
-			if (link.sending) {
-				link.channel.send(JSON.stringify({ type: 'miss', id: frame.id }));
-				return;
-			}
-			link.sending = true;
 			try {
+				if (this.closed || !this.enabled || this.mode !== 'both' || this.api.signal?.aborted || this.canServe?.() === false || link.channel.readyState !== 'open') return;
+				let bytes = this.cache.get(frame.address);
+				if (!bytes) for (const bundle of this.bundles.values()) {
+					if (bundle.peer !== link.id || bundle.cancelled || !bundle.objects?.has(frame.address)) continue;
+					this.touchBundle(bundle);
+					const object = bundle.objects.get(frame.address);
+					bytes = object.body ?? await object.load();
+					if (bundle.cancelled || this.closed || !this.enabled || this.mode !== 'both' || this.canServe?.() === false) return;
+					break;
+				}
+				if (!bytes) {
+					link.channel.send(JSON.stringify({ type: 'miss', id: frame.id }));
+					return;
+				}
 				for (let offset = 0; offset < bytes.length; offset += 32768) {
 					const deadline = Date.now() + 1500;
 					while (link.channel.bufferedAmount > 131072 && Date.now() < deadline) await delay(10);
@@ -263,7 +283,8 @@ export class LanPeers {
 					at += part.length;
 				}
 				const valid = (await fingerprint(body)) === task.address;
-				if (valid) { this.metrics.receivedBytes += body.length; this.metrics.receivedObjects++; }
+				if (this.pending.get(frame.id) !== task || this.closed || !this.enabled || this.api.signal?.aborted) return;
+				if (valid) { this.metrics.receivedBytes += body.length; this.metrics.receivedObjects++; this.remember(task.address, body); }
 				else this.metrics.failures++;
 				task.resolve(valid ? body : null);
 			}
@@ -271,6 +292,8 @@ export class LanPeers {
 	}
 	async load(address) {
 		if (this.closed || !this.enabled || this.mode !== 'both') return null;
+		const cached = this.cache.get(address);
+		if (cached) return cached;
 		const deadline = Date.now() + 2000;
 		let attempted = false;
 		for (const link of [...this.links.values()].filter(
@@ -279,7 +302,7 @@ export class LanPeers {
 			const remaining = deadline - Date.now();
 			if (remaining <= 0) break;
 			attempted = true;
-			const body = await this.loadFrom(link, address, Math.min(700, remaining));
+			const body = await this.loadFrom(link, address, Math.min(1500, remaining));
 			if (body) return body;
 		}
 		if (attempted) this.metrics.fallbacks++;
@@ -329,6 +352,8 @@ export class LanPeers {
 		bundle.timer = window.setTimeout(() => this.releaseBundle(bundle.key), 60000);
 	}
 	releaseBundle(key) {
+		const queued = this.queuedNotes.get(key);
+		if (queued) queued.cancelled = true;
 		const bundle = this.bundles.get(key);
 		if (!bundle) return;
 		bundle.cancelled = true;
@@ -340,11 +365,24 @@ export class LanPeers {
 	async serveNote(link, frame) {
 		const miss = () => { if (link.channel?.readyState === 'open') link.channel.send(JSON.stringify({ type: 'miss', id: frame.id })); };
 		if (!/^[a-f0-9]{64}$/.test(frame.note ?? '') || !/^[a-f0-9]{64}$/.test(frame.manifest ?? '')) throw Error('Invalid peer note request');
-		if (this.closed || !this.enabled || this.mode !== 'both' || this.canServe?.() === false || !this.provideNote || this.preparing || this.bundles.size >= 2) { miss(); return; }
+		if (this.closed || !this.enabled || this.mode !== 'both' || this.canServe?.() === false || !this.provideNote) { miss(); return; }
 		const key = link.id + '|' + frame.id;
-		if (this.bundles.has(key)) { miss(); return; }
+		if (this.bundles.has(key) || this.queuedNotes.has(key) || this.queuedNotes.size >= 16) { miss(); return; }
+		const queued = { peer: link.id, cancelled: false };
+		this.queuedNotes.set(key, queued);
+		let reserved;
+		try {
+			reserved = await this.reserveServe(link, () => {
+				if (this.preparing || this.bundles.size >= 2) return false;
+				this.preparing = true; return true;
+			}, () => !queued.cancelled);
+			if (!reserved) { miss(); return; }
+			if (queued.cancelled || this.closed || !this.enabled || this.mode !== 'both' || this.api.signal?.aborted || this.canServe?.() === false || link.channel?.readyState !== 'open') {
+				this.preparing = false; miss(); return;
+			}
+		} finally { this.queuedNotes.delete(key); }
 		const bundle = { key, peer: link.id, cancelled: false };
-		this.bundles.set(key, bundle); this.touchBundle(bundle); this.preparing = true;
+		this.bundles.set(key, bundle); this.touchBundle(bundle);
 		try {
 			const packed = await this.provideNote(frame.note, frame.manifest, () => !bundle.cancelled && !this.closed && this.enabled && this.mode === 'both' && this.canServe?.() !== false);
 			if (!packed) { this.releaseBundle(key); miss(); return; }
@@ -386,6 +424,7 @@ export class LanPeers {
 		const link = this.links.get(id);
 		if (!link) return;
 		this.links.delete(id);
+		for (const queued of this.queuedNotes.values()) if (queued.peer === id) queued.cancelled = true;
 		for (const [key, bundle] of this.bundles) if (bundle.peer === id) this.releaseBundle(key);
 		link.channel?.close();
 		link.pc.close();

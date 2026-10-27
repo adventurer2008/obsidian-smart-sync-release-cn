@@ -7,12 +7,14 @@ registerHooks({ resolve(specifier, context, next) {
 globalThis.window ??= globalThis;
 const { default: Plugin } = await import('../src/plugin.js');
 
-test('LAN status distinguishes enabled from actually connected and reports measured payloads', () => {
+test('LAN overview shows state only while connection details retain measured payloads', () => {
     const plugin = { data: { settings: { workspace: 'synthetic', lanAcceleration: true } } };
-    const summary = () => Plugin.prototype.lanSummary.call(plugin);
+    const summary = (details = false) => Plugin.prototype.lanSummary.call(plugin, details);
     assert.match(summary(), /暂无直连，使用云端/);
     plugin.lanPeers = { snapshot: () => ({ supported: true, connected: 2, receivedBytes: 1024, sentBytes: 2048, cloudBytes: 4096, fallbacks: 3 }) };
-    const text = summary();
+    assert.match(summary(), /已直连 2 台设备/);
+    assert.doesNotMatch(summary(), /KB|回退|已收/);
+    const text = summary(true);
     assert.match(text, /已直连 2 台设备/); assert.match(text, /已收 1 KB、已发 2 KB/);
     assert.match(text, /云端已收 4 KB/); assert.match(text, /回退 3 次/);
     plugin.data.settings.lanAcceleration = false; assert.match(summary(), /已关闭/);

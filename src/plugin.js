@@ -1841,13 +1841,13 @@ export default class IndependentSync extends Plugin {
 		}).open();
 		return report;
 	}
-	lanSummary() {
+	lanSummary(details = false) {
 		const stats = this.lanPeers?.snapshot();
 		const state = !this.data.settings.workspace ? t('sync.notConnected')
 			: this.data.settings.lanAcceleration === false ? t('lan.disabled')
 			: stats?.supported === false ? t('lan.unsupported')
 			: stats?.connected ? t('lan.connected', { count: stats.connected }) : t('lan.cloud');
-		return t('lan.summary', { state, received: formatStorageSize(stats?.receivedBytes ?? 0), sent: formatStorageSize(stats?.sentBytes ?? 0), cloud: formatStorageSize(stats?.cloudBytes ?? 0), fallbacks: stats?.fallbacks ?? 0 });
+		return details ? t('lan.summary', { state, received: formatStorageSize(stats?.receivedBytes ?? 0), sent: formatStorageSize(stats?.sentBytes ?? 0), cloud: formatStorageSize(stats?.cloudBytes ?? 0), fallbacks: stats?.fallbacks ?? 0 }) : state;
 	}
 	workspaceApi(origin, ...args) {
 		assertEditionOrigin(origin);
@@ -4058,12 +4058,11 @@ export default class IndependentSync extends Plugin {
 			}
 		};
 		const dialog = new ChoiceWindow(this.app, t('msg_43935c12b5'), (container) => {
+			if (!dialog.titleEl) action(container, t('device.refresh'), refresh);
 			if (!entries) {
 				container.createEl('p', { text: loadError ?? t('device.loading') });
-				if (loadError) action(container, t('device.refresh'), refresh);
 				return;
 			}
-			action(container, t('device.refresh'), refresh);
 			const revoked = entries.filter(device => device.revoked);
 			const active = entries.some(device => !device.revoked) ? container.createDiv({ cls: 'smart-sync-device-list' }) : undefined;
 			const history = revoked.length ? container.createEl('details', { cls: 'smart-sync-device-history' }) : undefined;
@@ -4079,9 +4078,6 @@ export default class IndependentSync extends Plugin {
 							: device.online
 								? t('device.online')
 								: t('device.offline'),
-						seen: device.lastSeen
-							? new Date(device.lastSeen).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
-							: t('device.never'),
 					}),
 				});
 				deviceInfo.title = `${device.id}${device.accountDevice ? ` · ${t('notebooks.accountDevice')}` : ''}${device.lastSeen ? ` · ${new Date(device.lastSeen).toLocaleString(locale)}` : ''}`;
@@ -4117,6 +4113,10 @@ export default class IndependentSync extends Plugin {
 		});
 		dialog.onClose = () => { closed = true; dialog.contentEl.empty(); };
 		dialog.open();
+		if (dialog.titleEl) {
+			dialog.titleEl.classList.add('smart-sync-device-header');
+			action(dialog.titleEl, t('device.refresh'), refresh);
+		}
 		dialog.ready = refresh();
 		await dialog.ready;
 		return dialog;
@@ -4711,7 +4711,6 @@ export class IndependentSettings extends PluginSettingTab {
 				'msg_b848f4c702',
 				'version.title',
 				'msg_d871435514',
-				'msg_507c2d5815',
 				'msg_36e7a43a1c',
 				'msg_6dc05b92e9',
 			].map((key) => t(key)),
@@ -4770,7 +4769,10 @@ export class IndependentSettings extends PluginSettingTab {
 				const cleanup = definition.render?.(setting);
 				const element = setting.settingEl;
 				if (!element) return cleanup;
+				this.containerEl.classList.add('smart-sync-settings-page');
 				(group?.listEl ?? element.parentElement).classList.add('smart-sync-common');
+				if ([t('version.title'), t('msg_b848f4c702'), '我的套餐'].includes(definition.name))
+					(group?.listEl ?? element.parentElement).classList.add('smart-sync-layout-root');
 				if (definition.name === t('version.title')) element.classList.add('smart-sync-version');
 				if (definition.name === t('msg_b848f4c702')) element.classList.add('smart-sync-title');
 				if (definition.name === t('sections.status') || actions.has(definition.name)) {
@@ -4788,6 +4790,14 @@ export class IndependentSettings extends PluginSettingTab {
 				return cleanup;
 			},
 		});
+		const overviewItem = definition => {
+			const decorated = present(definition);
+			return { ...decorated, render: (setting, group) => {
+				const cleanup = decorated.render(setting, group);
+				(group?.listEl ?? setting.settingEl?.parentElement)?.classList.add('smart-sync-overview-card');
+				return cleanup;
+			} };
+		};
 		const connected = Boolean(config.workspace);
 		const identityScope = () =>
 			`${plugin.data.settings.origin}|${plugin.data.settings.workspace}|${plugin.data.localId}`;
@@ -4797,10 +4807,20 @@ export class IndependentSettings extends PluginSettingTab {
 			let disposed = false;
 			let phase = plugin.overviewStatusText ?? plugin.status.textContent ?? plugin.status.text ?? t('sections.disconnected');
 			let server = t('overview.spaceUnknown'), local = t('overview.spaceUnknown'), sizeLoading = false, lastDescription;
+			const descriptionEl = setting.descEl ?? setting.settingEl?.querySelector('.setting-item-description');
+			const phaseEl = descriptionEl?.createSpan({ cls: 'smart-sync-status-phase' });
+			const spaceEl = descriptionEl?.createSpan({ cls: 'smart-sync-status-storage' });
 			const update = (text) => {
 				phase = text;
 				const description = connected ? t('overview.statusSpace', { state: phase, server, local }) : phase;
-				if (description !== lastDescription) { setting.setDesc(description); lastDescription = description; }
+				if (description !== lastDescription) {
+					if (phaseEl && spaceEl) {
+						phaseEl.setText(phase);
+						phaseEl.classList.toggle('is-synced', phase === t('overview.synced'));
+						spaceEl.setText(connected ? t('overview.compactSpace', { server, local }) : '');
+					} else setting.setDesc(description);
+					lastDescription = description;
+				}
 			};
 			const refreshSizes = async () => {
 				if (disposed || sizeLoading || !connected || identityScope() !== scopeKey) return;
@@ -4862,20 +4882,22 @@ export class IndependentSettings extends PluginSettingTab {
 			row(
 				t(name),
 				(setting) => {
+					let fullValue;
+					const info = setting.settingEl?.querySelector('.setting-item-info');
 					const update = () => {
 						const identity = plugin.overviewIdentity;
-						setting.setDesc(
-							!plugin.data.settings.workspace
+						fullValue = !plugin.data.settings.workspace
 								? (name === 'overview.account' && plugin.secret('account') ? (plugin.accountEmail || t('notebooks.accountSignedIn')) : t(name === 'overview.account' ? 'overview.signedOut' : 'sync.notConnected'))
 								: identityScope() === scopeKey && identity?.scope === scopeKey && identity[field]
 									? identity[field]
-									: t(fallback),
-						);
+									: t(fallback);
+						setting.setDesc(fullValue);
+						if (info) info.title = fullValue;
 					};
 					update();
 					for (const [label, method, argument] of buttons)
 						bindAction(setting, t(label), () => plugin[method](argument));
-					setting.settingEl?.classList.add('smart-sync-identity-row');
+					setting.settingEl?.classList.add('smart-sync-identity-row', field === 'label' ? 'smart-sync-library-row' : 'smart-sync-account-row');
 					plugin.statusListeners ??= new Set();
 					plugin.statusListeners.add(update);
 					return () => plugin.statusListeners.delete(update);
@@ -4898,9 +4920,26 @@ export class IndependentSettings extends PluginSettingTab {
 		]);
 		const lan = row(t('lan.statusTitle'), setting => {
 			let timer, disposed = false;
+			setting.settingEl?.classList.add('smart-sync-lan-status');
+			const details = setting.settingEl?.createEl('details', { cls: 'smart-sync-lan-details' });
+			const summary = details?.createEl('summary');
+			summary?.createSpan({ cls: 'smart-sync-lan-title', text: t('lan.statusTitle') });
+			const connectionState = summary?.createSpan({ cls: 'smart-sync-lan-state' });
+			summary?.createSpan({ cls: 'smart-sync-lan-entry', text: t('lan.details') });
+			if (details) {
+				details.open = this.expanded.has('lan.details');
+				details.addEventListener('toggle', () => {
+					if (details.open) this.expanded.add('lan.details');
+					else this.expanded.delete('lan.details');
+				});
+			}
+			const metrics = details?.createEl('p');
+			details?.createEl('p', { text: t('lan.fallbackHelp') });
 			const update = () => {
 				if (disposed || plugin.stopped || identityScope() !== scopeKey) { window.clearInterval(timer); return; }
 				setting.setDesc(plugin.lanSummary());
+				connectionState?.setText(plugin.lanSummary());
+				metrics?.setText(plugin.lanSummary(true));
 			};
 			update(); timer = window.setInterval(update, 1000); plugin.registerInterval(timer);
 			return () => { disposed = true; window.clearInterval(timer); };
@@ -4917,6 +4956,8 @@ export class IndependentSettings extends PluginSettingTab {
 			t('overview.devices'),
 			(setting) => {
 				setting.setDesc(t(connected ? 'overview.approveHelp' : 'overview.pairHelp'));
+				setting.settingEl?.classList.add('smart-sync-devices-row');
+				setting.settingEl?.createEl('p', { cls: 'smart-sync-pair-help', text: t(connected ? 'overview.pairHint' : 'overview.pairHelp') });
 				if (connected) {
 					bindAction(setting, t('overview.deviceManagement'), () => plugin.devices());
 					bindAction(setting, t('overview.addDevice'), () => plugin.addDevice());
@@ -4967,13 +5008,13 @@ export class IndependentSettings extends PluginSettingTab {
 		});
 		return [
 			...header.map(present),
-			present(status),
-			present(lan),
-			present(account),
+			{ type: 'group', name: t('overview.card'), cls: 'smart-sync-overview-group', items: [
+				...(accountConnected ? [overviewItem(notebook)] : []),
+				overviewItem(account), overviewItem(devices), overviewItem(status),
+				...common.filter(item => !header.includes(item)).map(overviewItem),
+				overviewItem(lan),
+			] },
 			...(billing ? [present(billing)] : []),
-			...(accountConnected ? [present(notebook)] : []),
-			present(devices),
-			...common.filter((item) => !header.includes(item)).map(present),
 			fold(t('overview.moreAccount'), t('overview.moreAccountHelp'), [
 				open(t('msg_87e1f4cf91'), 'eraseAccount'),
 			]),

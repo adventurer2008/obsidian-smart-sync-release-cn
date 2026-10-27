@@ -365,67 +365,74 @@
 }
 .is-mobile .smart-sync-common .smart-sync-manual-feedback { flex: 0 0 auto; }
 
-/* CHG-20261027-13: keep overview content inset when rows use zero inline padding. */
-.setting-items.smart-sync-common,
-.smart-sync-common:not(.setting-items) {
-  box-sizing: border-box;
-  padding-inline: clamp(16px, 3vw, 24px);
-}
+/* CHG-20261027-17: one device summary and a shared title/refresh row. */
+.smart-sync-device-header { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; padding-inline-end:28px; }
+.smart-sync-device-header > .setting-item { margin:0 0 0 auto; padding:0; border:0; background:transparent; }
+.smart-sync-device-header > .setting-item .setting-item-info,
+.smart-sync-device-card > .setting-item .setting-item-info { display:none; }
+.smart-sync-device-list { display:flex; flex-direction:column; gap:8px; }
+.is-mobile .smart-sync-device-header button { min-height:44px; }
+.smart-sync-device-card { display:flex; flex-wrap:wrap; align-items:center; row-gap:6px; padding:10px 12px; width:100%; box-sizing:border-box; }
+.smart-sync-device-card > p { display:inline; line-height:1.7; }
+.smart-sync-device-card > p + p::before { content:' · '; }
+.smart-sync-device-card > .setting-item { display:inline-flex; flex:0 0 auto; width:auto; margin:0 0 0 auto; padding:0 0 0 12px; background:transparent; }
+.smart-sync-device-card > .setting-item .setting-item-control { width:auto; margin:0; padding:0; }
 
-/* Wide mobile panes can use the same compact rows as desktop; split panes still stack. */
-@container wujie (min-width: 560px) {
-  .is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) {
-    flex-direction: row;
-    align-items: center;
-  }
-  .is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) > .setting-item-info {
-    flex: 1 1 0;
-    width: auto;
-  }
-  .is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) > .setting-item-control {
-    flex: 0 1 auto;
-    width: auto;
-    max-width: 60%;
-    justify-content: flex-end;
-  }
-  .is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action {
-    display: inline-flex;
-    flex: 0 1 auto;
-    width: auto;
-    margin: 0 0.5rem 0.75rem 0;
-    padding: 0;
-    border: 0;
-  }
-  .is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action > .setting-item-control {
-    max-width: 100%;
-    justify-content: flex-start;
-  }
-}
+/* CHG-20261027-18: keep connection diagnostics behind an inline disclosure. */
+.smart-sync-common .setting-item.smart-sync-lan-status { row-gap:4px; }
+.smart-sync-lan-status > .smart-sync-lan-details { flex:0 0 100%; width:100%; min-width:0; font-size:var(--font-ui-small); }
+.smart-sync-lan-status > .setting-item-info { display:none; }
+.smart-sync-lan-details > summary { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; cursor:pointer; list-style:none; }
+.smart-sync-lan-details > summary::-webkit-details-marker { display:none; }
+.smart-sync-lan-title { color:var(--text-normal); }
+.smart-sync-lan-state, .smart-sync-lan-entry { color:var(--text-muted); }
+.smart-sync-lan-title, .smart-sync-lan-entry { white-space:nowrap; }
+.smart-sync-lan-entry::before { content:'▶ '; font-size:0.8em; }
+.smart-sync-lan-details[open] > summary .smart-sync-lan-entry::before { content:'▼ '; }
+.smart-sync-lan-details > p { margin:6px 0; line-height:1.6; overflow-wrap:anywhere; }
+.is-mobile .smart-sync-lan-details > summary { min-height:44px; align-content:center; }
 
-/* CHG-20261027-14: compact action groups wrap together without empty full-width rows. */
-.smart-sync-common > .setting-item.smart-sync-overview-action,
-.is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action {
-  display: inline-flex;
-  flex: 0 1 auto;
-  width: auto;
-  margin: 4px 8px 8px 0;
-  padding: 0;
-  border: 0;
-  vertical-align: top;
+
+/* CHG-20261027-21: integrated overview, using SDK groups rather than moved setting rows. */
+.smart-sync-settings-page { box-sizing:border-box; max-width:960px; margin-inline:auto; }
+.smart-sync-settings-page > .setting-group, .setting-group.smart-sync-overview-group { max-width:100%; }
+.smart-sync-common.smart-sync-layout-root { padding:0; background:transparent; border:0; }
+.smart-sync-overview-group { flex:1 1 100%; width:100%; min-width:0; order:2; margin:16px 0; }
+.smart-sync-common.smart-sync-overview-card { --setting-items-divider-width:0; --setting-items-border-width:0; display:flex; flex-wrap:wrap; padding:20px 20px 0; margin:0; gap:0; border:1px solid var(--background-modifier-border); border-radius:14px; background:var(--background-primary); box-sizing:border-box; }
+.smart-sync-common.smart-sync-overview-card > .setting-item { background:transparent; border:0; border-radius:0; margin:0; min-width:0; box-sizing:border-box; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row { display:flex; flex-direction:row; flex-wrap:wrap; align-items:center; flex:1 1 100%; width:100%; padding:0; margin:0 0 16px; gap:8px 16px; order:0; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-info { display:flex; flex-direction:column; align-items:flex-start; align-self:center; flex:1 1 9rem; width:auto; min-width:0; margin:0; padding:0; }
+.smart-sync-overview-card .smart-sync-identity-row .setting-item-name { color:var(--text-muted); font-size:var(--font-ui-smaller); font-weight:var(--font-normal); margin:0; white-space:normal; }
+.smart-sync-overview-card .smart-sync-identity-row .setting-item-description { display:block; margin:4px 0 0; font-size:var(--font-ui-medium); color:var(--text-normal); line-height:1.5; white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; }
+.smart-sync-overview-card .smart-sync-library-row .setting-item-description { font-size:20px; font-weight:var(--font-semibold); }
+.smart-sync-overview-card .smart-sync-account-row .setting-item-description { font-size:var(--font-ui-small); }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-control { flex:0 1 auto; width:auto; max-width:100%; min-width:0; margin:0; gap:12px; justify-content:flex-end; }
+.smart-sync-overview-card .smart-sync-identity-row button { background:transparent; box-shadow:none; border:0; border-radius:6px; color:var(--text-muted); font-size:var(--font-ui-small); padding:6px 2px; min-height:40px; }
+.smart-sync-overview-card .smart-sync-identity-row button:hover { color:var(--text-normal); background:var(--background-modifier-hover); }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-devices-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 12px; margin:0; }
+.smart-sync-overview-card .smart-sync-devices-row .setting-item-description { display:none; }
+.smart-sync-overview-card .smart-sync-pair-help { grid-column:1/-1; width:100%; min-width:0; margin:0; font-size:var(--font-ui-smaller); line-height:1.6; color:var(--text-muted); overflow-wrap:anywhere; }
+.smart-sync-common.smart-sync-overview-card > .smart-sync-overview-status { flex:1 1 100%; width:100%; padding:0; margin:18px 0 14px; order:1; }
+.smart-sync-overview-card .smart-sync-overview-status .setting-item-name { display:none; }
+.smart-sync-overview-card .smart-sync-overview-status .setting-item-info { flex:1 1 100%; width:100%; margin:0; }
+.smart-sync-overview-card .smart-sync-overview-status .setting-item-description { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px 12px; white-space:normal; margin:0; }
+.smart-sync-status-phase { display:inline-block; max-width:100%; padding:3px 8px; border-radius:6px; color:var(--text-normal); background:var(--background-secondary); font-size:var(--font-ui-smaller); overflow-wrap:anywhere; }
+.smart-sync-status-phase.is-synced { color:var(--color-green); background:rgba(57,135,78,.09); }
+.smart-sync-status-storage { font-size:var(--font-ui-smaller); color:var(--text-muted); overflow-wrap:anywhere; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-overview-action { display:inline-flex; flex-direction:row; flex-wrap:wrap; flex:0 0 auto; width:auto; max-width:100%; margin:0 0 18px 8px; padding:0; border:0; order:2; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action { flex:1 1 12rem; margin-inline-start:0; min-width:0; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-overview-action > .setting-item-control { display:flex; flex-wrap:wrap; flex:1 1 auto; width:100%; max-width:100%; margin:0; gap:8px; }
+.smart-sync-overview-card .smart-sync-overview-action button { min-height:44px; height:auto; padding:9px 12px; border:1px solid var(--background-modifier-border); border-radius:8px; box-shadow:none; background:var(--background-primary); color:var(--text-normal); white-space:nowrap; }
+.smart-sync-overview-card .smart-sync-manual-action button.mod-cta { flex:1 1 auto; background:var(--interactive-accent); color:var(--text-on-accent); border-color:var(--interactive-accent); }
+.smart-sync-overview-card .smart-sync-manual-feedback { flex:0 0 100%; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:1 1 auto; }
+.smart-sync-common.smart-sync-overview-card > .smart-sync-lan-status { flex:1 1 100%; width:calc(100% + 40px); max-width:none; margin:0 -20px; padding:0 20px; border:0; border-top:1px solid var(--background-modifier-border); order:3; }
+.smart-sync-overview-card .smart-sync-lan-title { display:none; }
+.smart-sync-overview-card .smart-sync-lan-details > summary { justify-content:space-between; min-height:44px; gap:6px 12px; }
+.smart-sync-common.smart-sync-layout-root > .setting-item.smart-sync-billing { width:100%; margin:0 0 16px; padding:18px 20px; border:1px solid var(--background-modifier-border); border-radius:14px; background:var(--background-primary); }
+.is-mobile .smart-sync-overview-card .smart-sync-identity-row button { min-height:44px; }
+@container wujie (min-width:640px) {
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action { flex:0 1 auto; }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:0 1 180px; min-width:180px; }
 }
-.smart-sync-common > .setting-item.smart-sync-overview-action > .setting-item-control,
-.is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action > .setting-item-control {
-  flex: 0 1 auto;
-  width: auto;
-  max-width: 100%;
-  justify-content: flex-start;
-  gap: 8px;
-}
-.smart-sync-common > .setting-item.smart-sync-overview-action button {
-  padding-inline: 12px;
-  white-space: nowrap;
-}
-.is-mobile .smart-sync-common > .setting-item.smart-sync-identity-row {
-  padding-block: 8px;
-  row-gap: 6px;
-}
+@media(max-width:370px) { .smart-sync-common.smart-sync-overview-card { padding:16px 16px 0; } .smart-sync-common.smart-sync-overview-card > .smart-sync-lan-status { width:calc(100% + 32px); margin-inline:-16px; padding-inline:16px; } }
