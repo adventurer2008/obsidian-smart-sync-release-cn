@@ -70,14 +70,19 @@ export function pendingAttachment(notes, href, source = '') {
 			} else if (item && item !== '.') parts.push(item);
 		}
 		const path = safeNotePath(parts.join('/'));
-		const matches = Object.entries(notes).filter(
+		const attachments = Object.entries(notes).filter(
 			([, note]) =>
 				!note.removed &&
-				!note.downloaded &&
-				!note.path.toLowerCase().endsWith('.md') &&
-				(note.path === path || note.path === raw),
+				!note.path.toLowerCase().endsWith('.md'),
 		);
-		return matches.length === 1 ? matches[0] : undefined;
+		// Deferred files are absent from Obsidian's local link index. Resolve
+		// shortest wiki links against the remote inventory, retaining ambiguity
+		// even when one of the same-named attachments is already downloaded.
+		let matches = attachments.filter(([, note]) => note.path === path);
+		if (!matches.length) matches = attachments.filter(([, note]) => note.path === raw);
+		if (!matches.length && !raw.startsWith('/') && !raw.split('/').some(part => part === '..' || part === '.'))
+			matches = attachments.filter(([, note]) => note.path.endsWith(`/${raw}`));
+		return matches.length === 1 && !matches[0][1].downloaded ? matches[0] : undefined;
 	} catch {
 		return undefined;
 	}

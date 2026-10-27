@@ -394,7 +394,9 @@
 
 
 /* CHG-20261027-21: integrated overview, using SDK groups rather than moved setting rows. */
-.smart-sync-settings-page { box-sizing:border-box; max-width:960px; margin-inline:auto; }
+/* Let the host pane own its centering padding; a second width cap collapses
+   its content box when the settings window is maximized. */
+.smart-sync-settings-page { box-sizing:border-box; width:100%; min-width:0; max-width:none; margin-inline:0; }
 .smart-sync-settings-page > .setting-group, .setting-group.smart-sync-overview-group { max-width:100%; }
 .smart-sync-common.smart-sync-layout-root { padding:0; background:transparent; border:0; }
 .smart-sync-overview-group { flex:1 1 100%; width:100%; min-width:0; order:2; margin:16px 0; }

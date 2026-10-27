@@ -924,6 +924,11 @@ export default class IndependentSync extends Plugin {
 					);
 				}),
 			);
+		this.app.workspace.onLayoutReady?.(() => {
+			void this.downloadNoteAttachments(this.app.workspace.getActiveFile()).catch((error) =>
+				this.notify(failureMessage(error)),
+			);
+		});
 
 		if (typeof document !== 'undefined' && this.registerDomEvent)
 			this.registerDomEvent(

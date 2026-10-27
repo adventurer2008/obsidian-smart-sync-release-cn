@@ -34,7 +34,13 @@ function element() {
 			contains: name => classes.has(name),
 			toggle: (name, force) => { const enabled = force ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; },
 		},
-		querySelector() { return null; },
+		querySelectorAll(selector) {
+			return this.children.filter(child => child.isConnected).flatMap(child => [
+				...(selector.startsWith('.') ? child.classList.contains(selector.slice(1)) : child.tag === selector) ? [child] : [],
+				...child.querySelectorAll(selector),
+			]);
+		},
+		querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; },
 		text: '',
 		value: '',
 		isConnected: true,
@@ -55,6 +61,7 @@ function element() {
 		createEl(tag, options = {}) {
 			const child = element();
 			child.tag = tag;
+			for (const name of (options.cls ?? '').split(/\s+/).filter(Boolean)) child.classList.add(name);
 			child.text = options.text ?? '';
 			this.children.push(child);
 			return child;
