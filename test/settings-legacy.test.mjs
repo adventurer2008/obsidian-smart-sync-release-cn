@@ -91,3 +91,23 @@ test('tray changes persist before runtime changes; failed storage preserves the 
 	assert.equal(plugin.data.settings.backgroundTray, false); assert.equal(refreshed, 1);
 	assert.equal(plugin.data.manualSyncStopped, true);
 });
+
+test('attachment selector restores the saved value and reports a rejected change', async t => {
+	const { tab, plugin } = fixture(t);
+	plugin.data.settings.attachmentMiB = 256;
+	const messages = [];
+	plugin.notify = message => messages.push(message);
+	let rejectChange;
+	plugin.setAttachmentDownload = () => new Promise((_, reject) => { rejectChange = reject; });
+	tab.display();
+	const control = [...tab.containerEl.querySelectorAll('.setting-item')]
+		.flatMap(el => el.setting.controls).find(control => control.options?.['on-note-open']);
+	control.value = 'on-note-open';
+	const changing = control.change('on-note-open');
+	assert.equal(control.disabled, true);
+	rejectChange(Object.assign(Error('busy'), {code: 'SYNC_BUSY'}));
+	await changing;
+	assert.equal(control.value, 'always'); assert.equal(control.disabled, false);
+	assert.equal(messages.length, 1);
+	assert.equal(plugin.data.settings.attachmentMiB, 256);
+});

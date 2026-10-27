@@ -59,6 +59,7 @@ import { desktopFiles } from './desktop.js';
 import { createBackgroundTray } from './background-tray.js';
 import {
 	emptyState,
+	IncrementalInventory,
 	NotebookSynchronizer,
 	pendingAttachment,
 	recordRename,
@@ -761,6 +762,7 @@ export default class IndependentSync extends Plugin {
 						for (const view of this.noteSearchViews) view.invalidate(file, oldPath);
 						this.idleRounds = 0;
 						this.inventoryRevision = (this.inventoryRevision ?? 0) + 1;
+						for (const inventory of this.incrementalInventories?.values() ?? []) inventory.changed(event, file?.path);
 						if (event === 'create' && file instanceof TFile && this.startupInventory.delete(file.path)) {
 							const stat = file.stat;
 							if (stat && [stat.size, stat.mtime, stat.ctime].every(Number.isFinite) && Object.values(this.data.connections).some(state => {
@@ -1180,10 +1182,36 @@ export default class IndependentSync extends Plugin {
 	}
 	async setAttachmentDownload(mode) {
 		if (!['always', 'on-note-open'].includes(mode)) throw Error('Invalid attachment mode');
-		if (this.running) throw operationBusy();
-		await this.setting('attachmentMiB', mode === 'always' ? 256 : 0);
+		if (this.running && !this.stopRun) throw operationBusy();
+		const binding = this.editorBinding();
+		const previousSave = this.attachmentSave;
+		// Stop drains writes asynchronously. Reserve the settings change now so a
+		// manual/automatic cycle cannot resume with the old policy during the save.
+		this.configurationPending = (this.configurationPending ?? 0) + 1;
+		const saving = (async () => {
+			await previousSave?.catch(() => {});
+			await this.stopRun;
+			if (this.stopped || binding !== this.editorBinding()) throw Error('Configuration scope changed');
+			if (this.running) throw operationBusy();
+			const previous = this.data.settings.attachmentMiB;
+			const connection = this.data.connections[`${new URL(this.data.settings.origin).origin}|${this.data.settings.workspace}`];
+			const cursor = connection?.cursor;
+			const plan = this.pendingPlan;
+			try { await this.setting('attachmentMiB', mode === 'always' ? 256 : 0); }
+			catch (error) {
+				this.data.settings.attachmentMiB = previous;
+				if (connection) connection.cursor = cursor;
+				this.pendingPlan = plan;
+				throw error;
+			}
+		})().finally(() => {
+			this.configurationPending--;
+			if (this.attachmentSave === saving) this.attachmentSave = undefined;
+		});
+		this.attachmentSave = saving;
+		await saving;
 		this.tab?.update();
-		if (mode === 'on-note-open')
+		if (mode === 'on-note-open' && !this.configurationPending)
 			await this.downloadNoteAttachments(this.app.workspace.getActiveFile());
 	}
 	async downloadNoteAttachments(file) {
@@ -2172,6 +2200,8 @@ export default class IndependentSync extends Plugin {
 			stopped: () => this.stopped || api.signal.aborted,
 			onPluginStateChanged: () => { this.pluginStateRestartPending = true; },
 		});
+		this.incrementalInventories ??= new Map();
+		if (!this.incrementalInventories.has(connectionId)) this.incrementalInventories.set(connectionId, new IncrementalInventory());
 		this.idleScans ??= new Map();
 		if (!this.idleScans.has(connectionId)) this.idleScans.set(connectionId, {});
 		// Configuration files can change outside vault events, so they retain full scans.
@@ -2189,6 +2219,23 @@ export default class IndependentSync extends Plugin {
 		if (this.lanPeers) this.lanPeers.resumeCache = receiveCache;
 		const engine = new NotebookSynchronizer({
 			contentPriorities: this.contentPriorities.get(connectionId),
+			incrementalInventory: this.incrementalInventories.get(connectionId),
+			commitJournal: this.checkpoints ? {
+				current: () => this.data.commitJournals?.[connectionId],
+				write: async journal => {
+					this.ensureCurrent(api);
+					this.data.commitJournals ??= {};
+					this.data.commitJournals[connectionId] = journal;
+					await this.checkpoints.saveConfiguration(this.data);
+				},
+				clear: async () => {
+					const journal = this.data.commitJournals?.[connectionId];
+					delete this.data.commitJournals?.[connectionId];
+					try { await this.checkpoints.saveConfiguration(this.data); }
+					catch (error) { this.data.commitJournals[connectionId] = journal; throw error; }
+				},
+			} : undefined,
+			scanPolicy: allowIdleScan && configurationVersion !== undefined ? JSON.stringify([this.data.settings, this.lanPeers?.mode ?? 'both', configurationVersion]) : undefined,
 			saveRequired,
 			scanCache: this.idleScans.get(connectionId),
 			scanVersion: allowIdleScan && configurationVersion !== undefined ? () => JSON.stringify([this.inventoryRevision ?? 0, this.data.settings, this.lanPeers?.mode ?? 'both', configurationVersion]) : undefined,
@@ -4522,8 +4569,14 @@ export class IndependentSettings extends PluginSettingTab {
 						})
 						.setValue(config.attachmentMiB === 0 ? 'on-note-open' : 'always')
 						.onChange(async (value) => {
-							await plugin.setAttachmentDownload(value);
-							this.update();
+							input.setDisabled(true);
+							try { await plugin.setAttachmentDownload(value); }
+							catch (error) { plugin.notify(failureMessage(error)); }
+							finally {
+								input.setValue(plugin.data.settings.attachmentMiB === 0 ? 'on-note-open' : 'always');
+								input.setDisabled(false);
+								this.update();
+							}
 						}),
 				),
 			),

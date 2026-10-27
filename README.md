@@ -143,20 +143,15 @@
 
 已通过 BRAT 安装的用户，可继续使用仓库 `adventurer2008/obsidian-smart-sync-release-cn` 更新。手动安装及文件校验见[操作手册](USER-GUIDE.md#手动安装)。
 
-## 当前版本：1.0.6（2026-10-26）
+## 当前版本：1.0.7（2026-10-27）
 
-支持PC、手机和折叠屏的自适应页面；手动停止后保持暂停，单文件接收失败保留重试并继续处理后续文件。本地搜索边扫描边显示结果。保留文件原始修改时间、加密、设备配对和历史恢复等功能。详见[更新说明](RELEASE-NOTES.md)。
+修复手机设置布局及停止后附件策略切换，增加日常增量扫描和中断后的提交恢复；购买页补充存储与加密说明。保留文件原始修改时间、加密、设备配对和历史恢复等功能。详见[更新说明](RELEASE-NOTES.md)。
 
 ## 关注无界同步
 
-获取使用教程、版本动态，也欢迎反馈问题和建议。
-
 | 微信公众号 | 小红书 |
 | --- | --- |
-| **Obsidian智行无界同步** | **无界同步** |
-| <img src="assets/wujie-sync-wechat-public.png" width="220" alt="微信公众号 Obsidian智行无界同步 关注二维码"> | <img src="assets/wujie-sync-xiaohongshu.png" width="220" alt="小红书 无界同步 账号二维码"> |
-| 微信扫码关注，或搜索公众号名称 | 使用小红书扫码，或搜索小红书号：**18121930039** |
+| Obsidian智行无界同步 | 无界同步 · 18121930039 |
+| <img src="assets/wujie-sync-wechat-public.png" width="180" alt="公众号二维码"> | <img src="assets/wujie-sync-xiaohongshu.png" width="180" alt="小红书二维码"> |
 
-[查看公众号二维码原图](assets/wujie-sync-wechat-public.png) · [查看小红书二维码原图](assets/wujie-sync-xiaohongshu.png)
-
-反馈问题时请说明插件版本、设备及具体情况，可附上相关截图；订单问题请保留订单号。请勿发送登录密钥、笔记库加密口令或私人笔记内容。
+扫码关注或反馈问题。请勿发送登录密钥、加密口令或私人笔记。

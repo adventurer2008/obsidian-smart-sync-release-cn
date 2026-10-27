@@ -97,6 +97,34 @@ function renameConflict(message) {
 	error.code = 'RENAME_CONFLICT';
 	return error;
 }
+// Device-local event hints are an optimization, never a deletion inventory.
+// A new process, structural change, policy change or expired audit always scans fully.
+export class IncrementalInventory {
+	constructor({ auditMs = 60000, limit = 4096, now = () => Date.now() } = {}) {
+		this.auditMs = auditMs; this.limit = limit; this.now = now;
+		this.revision = 0; this.structural = 0; this.dirty = new Map();
+	}
+	changed(event, path) {
+		const revision = ++this.revision;
+		if (event !== 'modify' || typeof path !== 'string' || this.dirty.size >= this.limit) {
+			this.structural = revision; this.dirty.clear();
+		} else this.dirty.set(path, revision);
+	}
+	invalidate() { this.structural = ++this.revision; this.baseline = undefined; }
+	begin(state, policy, force = false) {
+		const baseline = this.baseline, now = this.now();
+		return { revision: this.revision, state, policy, at: now,
+			full: force || !baseline || baseline.state !== state || baseline.policy !== policy ||
+				this.structural > baseline.revision || now < baseline.at || now - baseline.at >= this.auditMs,
+			paths: [...this.dirty.keys()] };
+	}
+	finish(plan) {
+		for (const [path, revision] of this.dirty) if (revision <= plan.revision) this.dirty.delete(path);
+		this.baseline = { state: plan.state, policy: plan.policy, revision: plan.revision,
+			at: plan.full ? plan.at : this.baseline.at };
+	}
+}
+
 export class NotebookSynchronizer {
 	#running;
 	#active;
@@ -169,6 +197,9 @@ export class NotebookSynchronizer {
 		contentPriorities = new Map(),
 		scanCache,
 		scanVersion,
+		incrementalInventory,
+		scanPolicy,
+		commitJournal,
 		saveRequired = false,
 	}) {
 		if (
@@ -191,6 +222,9 @@ export class NotebookSynchronizer {
 			contentPriorities,
 			scanCache,
 			scanVersion,
+			incrementalInventory,
+			scanPolicy,
+			commitJournal,
 			remoteMode,
 			checkpointSize,
 			checkpointInterval,
@@ -228,7 +262,93 @@ export class NotebookSynchronizer {
 			typeof state.pendingReceives !== 'object' || Object.entries(state.pendingReceives).some(([note, entry]) =>
 				note !== entry?.note || !validEntry(entry, 0) || (entry.path !== undefined && safeNotePath(entry.path) !== entry.path))))
 			throw Error('Invalid pending receive state');
+		const durableCommit = this.commitJournal?.current();
+		if (durableCommit !== undefined) this.state.pendingCommit = durableCommit;
+		this.#validateCommitJournal();
 		if (saveRequired) unsavedStates.add(this.state);
+	}
+	#validateCommitJournal() {
+		const journal = this.state.pendingCommit;
+		if (journal === undefined) return;
+		if (!journal || journal.format !== 1 || journal.workspace !== this.api.workspace || journal.origin !== (this.api.origin ?? '') ||
+			!['prepared', 'acknowledged'].includes(journal.phase) || !Array.isArray(journal.entries) || !journal.entries.length || journal.entries.length > 128 ||
+			new Set(journal.entries.map(item => item?.note)).size !== journal.entries.length || journal.entries.some(item =>
+				!item || !/^[a-f0-9]{64}$/.test(item.note) || !/^[a-f0-9]{64}$/.test(item.manifest) ||
+				!Number.isSafeInteger(item.expected) || item.expected < 0 || typeof item.removed !== 'boolean' ||
+				!item.next || safeNotePath(item.next.path) !== item.next.path || !['file','folder'].includes(item.next.kind) ||
+				!/^[a-f0-9]{64}$/.test(item.next.digest) ||
+				((journal.phase === 'acknowledged' || item.receipt !== undefined) && !this.#matchesCommit(item.receipt, item)))) throw Error('Invalid pending commit journal');
+	}
+	#matchesCommit(receipt, item) {
+		return validEntry(receipt, item.expected) && receipt.note === item.note && receipt.manifest === item.manifest && receipt.removed === item.removed;
+	}
+	async #submitCommit(inputs, next, batch = false) {
+		this.assertActive();
+		if (this.state.pendingCommit && (!this.commitJournal || this.state.pendingCommit.phase !== 'acknowledged')) throw Error('Pending commit must be reconciled before submitting');
+		if ((this.state.pendingCommit?.entries.length ?? 0) + inputs.length > 128) await this.#flush();
+		const prior = this.state.pendingCommit?.entries ?? [];
+		const journal = { format: 1, workspace: this.api.workspace, origin: this.api.origin ?? '', phase: 'prepared',
+			entries: [...prior, ...inputs.map((input, index) => ({ note: input.note, expected: input.expected ?? 0,
+				manifest: input.manifest ?? next[index].manifest, removed: input.removed,
+				next: { path: next[index].path, kind: next[index].kind ?? 'file', digest: next[index].digest } }))] };
+		this.state.pendingCommit = journal;
+		this.#validateCommitJournal();
+		unsavedStates.add(this.state);
+		if (this.commitJournal) await this.commitJournal.write(journal);
+		else await this.#flush(); // Intent is durable before any request may publish a revision.
+		this.assertActive();
+		const receipts = batch ? (await this.api.commitBatch(inputs))?.entries : [await this.api.commit(inputs[0].note, inputs[0])];
+		if (!Array.isArray(receipts) || receipts.length !== inputs.length || receipts.some((entry, index) => !this.#matchesCommit(entry, journal.entries[prior.length + index])))
+			throw Error('Invalid commit acknowledgement');
+		for (let index = 0; index < receipts.length; index++) journal.entries[prior.length + index].receipt = receipts[index];
+		journal.phase = 'acknowledged';
+		unsavedStates.add(this.state);
+		// Piggyback receipts on the next journal write or normal checkpoint.
+		// Until then the durable intent is sufficient to reconcile a lost response.
+		if (!this.commitJournal) await this.#flush();
+		return receipts;
+	}
+	async #finishCommit(force = false, alreadyPersisted = false) {
+		if (this.commitJournal && !force) { if (!alreadyPersisted) await this.#persist(); return; }
+		const journal = this.state.pendingCommit;
+		delete this.state.pendingCommit;
+		unsavedStates.add(this.state);
+		try { await this.#flush(); await this.commitJournal?.clear(); }
+		catch (error) { this.state.pendingCommit = journal; unsavedStates.add(this.state); throw error; }
+	}
+	async #recoverCommit() {
+		const journal = this.state.pendingCommit;
+		if (!journal) return;
+		this.#validateCommitJournal();
+		this.incrementalInventory?.invalidate();
+		for (const item of journal.entries) {
+			this.assertActive();
+			let receipt = item.receipt;
+			if (journal.phase === 'prepared' && !receipt) {
+				if (typeof this.api.versions !== 'function') throw Error('Commit recovery requires revision history');
+				let before, resolved = false;
+				for (let page = 0; page < 128; page++) {
+					const history = await this.api.versions(item.note, before);
+					if (!Array.isArray(history?.entries) || typeof history.more !== 'boolean' || (history.more && !history.entries.length)) throw Error('Invalid commit recovery history');
+					let previous = before ?? Number.MAX_SAFE_INTEGER;
+					for (const entry of history.entries) {
+						if (!validEntry(entry, 0) || entry.note !== item.note || entry.sequence >= previous) throw Error('Invalid commit recovery sequence');
+						previous = entry.sequence;
+					}
+					receipt = history.entries.find(entry => this.#matchesCommit(entry, item));
+					if (receipt || !history.more || previous <= item.expected) { resolved = true; break; }
+					before = previous;
+				}
+				if (!resolved) throw Error('Commit recovery history exceeds the bounded window');
+			}
+			if (!receipt) continue; // Never blindly resend an uncertain upload or deletion.
+			if ((this.state.notes[item.note]?.revision ?? 0) >= receipt.sequence) continue;
+			const info = await inspectNote(this.keys, this.api.workspace, item.note, item.manifest, address => this.api.load(address));
+			if (info.path !== item.next.path || info.digest !== item.next.digest || info.kind !== item.next.kind) throw Error('Commit recovery metadata mismatch');
+			this.state.notes[item.note] = { ...item.next, revision: receipt.sequence, manifest: item.manifest,
+				removed: item.removed, downloaded: !item.removed };
+		}
+		await this.#finishCommit(true);
 	}
 	async timed(stage, work) {
 		const started = performance.now();
@@ -306,6 +426,7 @@ export class NotebookSynchronizer {
 			.catch(async (error) => {
 				unsavedStates.add(this.state);
 				if (this.scanCache) this.scanCache.state = undefined;
+				this.incrementalInventory?.invalidate();
 				for (const job of this.#queuedUploads.splice(0))
 					await this.onTask({ ...job.task, status: 'failed', error }).catch(() => {});
 				for (const task of this.#completed.splice(0))
@@ -445,8 +566,17 @@ export class NotebookSynchronizer {
 	}
 	async #flush() {
 		if (!unsavedStates.has(this.state) && !this.#completed.length) return;
-		try { await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state); }
-		catch (error) { this.#checkpointFailed = true; throw error; }
+		const journal = this.state.pendingCommit;
+		const retire = this.commitJournal && journal?.phase === 'acknowledged' &&
+			journal.entries.every(item => (this.state.notes[item.note]?.revision ?? 0) >= item.receipt.sequence);
+		if (retire) delete this.state.pendingCommit;
+		try {
+			await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state);
+			if (retire) await this.commitJournal.clear();
+		} catch (error) {
+			if (retire) this.state.pendingCommit = journal;
+			this.#checkpointFailed = true; throw error;
+		}
 		unsavedStates.delete(this.state);
 		this.#pendingSaves = 0;
 		this.#pendingBytes = 0;
@@ -909,6 +1039,7 @@ export class NotebookSynchronizer {
 		const targets = target ? new Set(Array.isArray(target) ? target : [target]) : undefined;
 		if (this.direction === 'paused' || this.remoteMode === 'paused') return;
 		this.assertActive();
+		await this.#recoverCommit();
 		const version = this.scanVersion?.();
 		let remoteChanged = false;
 		const receivedRemovals = new Set();
@@ -1041,7 +1172,22 @@ export class NotebookSynchronizer {
 		if (this.#completed.some(task => task.direction === 'receive')) await this.#flush();
 		if (Object.values(this.state.pendingReceives ?? {}).some(entry => !entry.path)) return;
 		const cache = this.scanCache;
-		if (!targets && ceiling === undefined && !remoteChanged && version !== undefined &&
+		let incrementalPlan;
+		if (!priorityPaths && !targets && ceiling === undefined && this.incrementalInventory && this.scanPolicy !== undefined) {
+			incrementalPlan = this.incrementalInventory.begin(this.state, this.scanPolicy,
+				remoteChanged || Object.keys(this.renames).length > 0 || Object.keys(this.state.pendingReceives ?? {}).length > 0 || Object.keys(this.state.pendingTreeDeletions ?? {}).length > 0);
+			if (!incrementalPlan.full) {
+				if (!incrementalPlan.paths.length) { this.incrementalInventory.finish(incrementalPlan); return; }
+				const known = new Map();
+				for (const note of Object.values(this.state.notes)) if (!note.removed && note.downloaded && (note.kind ?? 'file') === 'file')
+					known.set(note.path, (known.get(note.path) ?? 0) + 1);
+				if (incrementalPlan.paths.some(path => known.get(path) !== 1 || this.excluded(path))) incrementalPlan.full = true;
+				else {
+					priorityPaths = incrementalPlan.paths;
+				}
+			}
+		}
+		if (!incrementalPlan && !targets && ceiling === undefined && !remoteChanged && version !== undefined &&
 			!Object.keys(this.renames).length && cache?.state === this.state &&
 			cache.version === version && Date.now() >= cache.at && Date.now() - cache.at < 60000) return;
 		let files = (priorityPaths ?? await this.host.list()).filter(path => !this.#heldPath(path));
@@ -1140,7 +1286,7 @@ export class NotebookSynchronizer {
 					if (job.packed.info.mtime !== undefined && await this.host.mtime(job.path) !== job.packed.info.mtime)
 						throw Object.assign(new Error('Source time changed during batch upload'), { code: 'PLAN_CHANGED' });
 				}
-				const reply = await this.api.commitBatch(jobs.map(job => ({ note: job.id, pathKey: job.pathKey, expected: job.previous?.revision ?? 0, manifest: job.packed.manifest, logicalBytes: job.packed.info.bytes, objects: [...job.packed.info.segments.map(piece => piece.address), job.packed.manifest], removed: false })));
+				const reply = { entries: await this.#submitCommit(jobs.map(job => ({ note: job.id, pathKey: job.pathKey, expected: job.previous?.revision ?? 0, manifest: job.packed.manifest, logicalBytes: job.packed.info.bytes, objects: [...job.packed.info.segments.map(piece => piece.address), job.packed.manifest], removed: false })), jobs.map(job => ({ path: job.path, kind: 'file', digest: job.digest })), true) };
 				if (!Array.isArray(reply?.entries) || reply.entries.length !== jobs.length || reply.entries.some((entry, index) => !validEntry(entry, 0) || entry.note !== jobs[index].id || entry.manifest !== jobs[index].packed.manifest || entry.removed)) throw Error('Invalid batch commit acknowledgement');
 				for (let index = 0; index < jobs.length; index++) {
 					const job = jobs[index];
@@ -1152,6 +1298,7 @@ export class NotebookSynchronizer {
 					this.#completed.push({ ...job.task, status: 'done', workMilliseconds: Math.max(0, performance.now() - job.task.workStartedAt), completedAt: performance.now() });
 					await this.#persist();
 				}
+				await this.#finishCommit(false, true);
 			} catch (error) {
 				for (const job of jobs) await this.onTask({ ...job.task, status: 'failed', error }).catch(() => {});
 				throw error;
@@ -1215,7 +1362,7 @@ export class NotebookSynchronizer {
 				kind === 'folder'
 					? { contents: new Uint8Array(), digest: await fingerprint(new Uint8Array()) }
 					: await this.localFile(path);
-			if (file === null && priorityPaths) continue;
+			if (file === null && priorityPaths && !incrementalPlan) continue;
 			if (file === null)
 				throw Object.assign(new Error('Inventory changed during synchronization'), {
 					code: 'PLAN_CHANGED',
@@ -1363,14 +1510,14 @@ export class NotebookSynchronizer {
 						if (file.mtime !== undefined && await this.host.mtime(path) !== file.mtime)
 							throw Object.assign(new Error('Source time changed during upload'), { code: 'PLAN_CHANGED' });
 					}
-					const committed = await this.api.commit(id, {
+					const [committed] = await this.#submitCommit([{ note: id,
 						pathKey,
 						expected: previous?.revision ?? 0,
 						manifest: packed.manifest,
 						logicalBytes: packed.info.bytes,
 						objects: [...packed.info.segments.map((piece) => piece.address), packed.manifest],
 						removed: false,
-					});
+					}], [{ path, kind, digest }]);
 					if (
 						!validEntry(committed, 0) ||
 						committed.note !== id ||
@@ -1391,14 +1538,17 @@ export class NotebookSynchronizer {
 					if (previous) byPath.delete(previous.path);
 					byPath.set(path, [id, this.state.notes[id]]);
 					if (kind === 'file') rememberBase(this.state, id, contents);
-					await this.#persist();
+					await this.#finishCommit();
 				} finally {
 					await packed.dispose?.();
 				}
 			});
 		}
 		await flushUploads();
-		if (priorityPaths) return;
+		if (priorityPaths) {
+			if (incrementalPlan) this.incrementalInventory.finish(incrementalPlan);
+			return;
+		}
 		if (!targets && ceiling === undefined) await this.#prioritizeContent();
 		const deletions = [];
 		for (const [id, previous] of Object.entries(this.state.notes)) {
@@ -1427,7 +1577,7 @@ export class NotebookSynchronizer {
 				for (const [, previous] of batch)
 					if (this.host.exists ? await this.host.exists(previous.path) : await this.host.read(previous.path) !== null)
 						throw Object.assign(new Error('Local path reappeared before batch deletion'), { code: 'PLAN_CHANGED' });
-				const reply = await this.api.commitBatch(batch.map(([note, previous]) => ({ note, expected: previous.revision, removed: true })));
+				const reply = { entries: await this.#submitCommit(batch.map(([note, previous]) => ({ note, expected: previous.revision, removed: true })), batch.map(([, previous]) => previous), true) };
 				if (!Array.isArray(reply?.entries) || reply.entries.length !== batch.length || reply.entries.some((entry,index) => !validEntry(entry,0) || entry.note !== batch[index][0] || !entry.removed)) throw Error('Invalid batch deletion acknowledgement');
 				for (let index = 0; index < batch.length; index++) {
 					const [id, previous] = batch[index];
@@ -1436,6 +1586,7 @@ export class NotebookSynchronizer {
 						await this.#persist();
 					});
 				}
+				await this.#finishCommit(false, true);
 			}
 		}
 		for (const [id, previous] of batchDelete ? [] : deletions) {
@@ -1448,10 +1599,7 @@ export class NotebookSynchronizer {
 					throw Object.assign(new Error('Local path reappeared before deletion'), {
 						code: 'PLAN_CHANGED',
 					});
-				const committed = await this.api.commit(id, {
-					expected: previous.revision,
-					removed: true,
-				});
+				const [committed] = await this.#submitCommit([{ note: id, expected: previous.revision, removed: true }], [previous]);
 				if (!validEntry(committed, 0) || committed.note !== id || !committed.removed)
 					throw new Error('Invalid deletion acknowledgement');
 				this.state.notes[id] = {
@@ -1460,11 +1608,12 @@ export class NotebookSynchronizer {
 					removed: true,
 					downloaded: false,
 				};
-				await this.#persist();
+				await this.#finishCommit();
 			});
 		}
 		for (const path of Object.keys(this.state.localIndex))
 			if (!present.has(path)) { delete this.state.localIndex[path]; unsavedStates.add(this.state); }
+		if (incrementalPlan) this.incrementalInventory.finish(incrementalPlan);
 		if (cache && !targets && ceiling === undefined && version !== undefined && this.scanVersion() === version)
 			Object.assign(cache, { state: this.state, version, at: Date.now() });
 	}

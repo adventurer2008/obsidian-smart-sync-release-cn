@@ -323,3 +323,44 @@
 
 /* CHG-20261026-20: keep quick stop immediately beside manual sync. */
 .smart-sync-common .smart-sync-manual-action .setting-item-control { flex-wrap: nowrap; gap: 0.5rem; }
+
+/* CHG-20261027-02: a horizontal text basis becomes height in mobile column rows. */
+.is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex: 0 0 auto;
+  height: auto;
+  min-height: 0;
+}
+.is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) > .setting-item-info {
+  flex: 0 0 auto;
+  width: 100%;
+  margin-inline-end: 0;
+}
+.is-mobile .smart-sync-common .setting-item:not(.smart-sync-billing) > .setting-item-control {
+  flex: 0 0 auto;
+  width: 100%;
+  margin: 0;
+  justify-content: flex-start;
+}
+.is-mobile .smart-sync-common > .setting-item.smart-sync-overview-action {
+  width: 100%;
+  margin-inline-end: 0;
+}
+.is-mobile .smart-sync-common .setting-item.smart-sync-overview-action .setting-item-control button,
+.is-mobile .smart-sync-common .setting-item.smart-sync-identity-row .setting-item-control button {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+.is-mobile .smart-sync-common .smart-sync-manual-action .setting-item-control {
+  flex-wrap: wrap;
+}
+.is-mobile .smart-sync-common .setting-item.smart-sync-manual-action .setting-item-control button {
+  white-space: nowrap;
+}
+.is-mobile .smart-sync-common .smart-sync-manual-feedback { flex: 0 0 auto; }
