@@ -147,6 +147,50 @@ function journalStore() {
  return {current:()=>structuredClone(durable),write:async value=>{writes++;durable=structuredClone(value);},clear:async()=>{durable=undefined;},writes:()=>writes};
 }
 
+for (const failCheckpoint of [false, true]) test(`whole-batch checkpoint retires intent atomically and survives applied-save failure=${failCheckpoint}`, async (t) => {
+ // This case tests a size-bounded batch, not elapsed preparation time. Keep slow
+ // crypto/parallel CI load from triggering the separate 1s batch-wait bound.
+ t.mock.timers.enable({ apis: ['Date'], now: originalTime });
+ const f=fixture(); for(let n=0;n<128;n++)f.set(`batch${n}.md`,`body ${n}`);
+ let saved=emptyState(), durableJournal, fail=failCheckpoint, clearWrites=0, done=0;
+ const sizes=[];
+ const journal={atomicCheckpoint:true,current:()=>structuredClone(durableJournal),write:async value=>{durableJournal=structuredClone(value);},
+  clear:async({checkpointed=false}={})=>{if(!checkpointed)clearWrites++;durableJournal=undefined;}};
+ const engine=()=>f.engine({state:structuredClone(saved),direction:'send',batchTransfer:true,batchFiles:128,batchWaitMs:1000,
+  checkpointSize:100,checkpointInterval:1000000,commitJournal:journal,
+  save:async(state,{retireCommit}={})=>{
+   sizes.push(Object.keys(state.notes).length);
+   if(retireCommit && fail){fail=false;throw Error('atomic checkpoint unavailable');}
+   saved=structuredClone(state);if(retireCommit)durableJournal=undefined;
+  },onTask:async event=>{if(event.status==='done'){assert.ok(saved.notes[event.note]?.downloaded);assert.equal(saved.pendingCommit,undefined);done++;}}});
+ if(failCheckpoint){await assert.rejects(engine().run(),/atomic checkpoint unavailable/);assert.equal(durableJournal.phase,'prepared');}
+ await engine().run();
+ assert.equal(f.revisions.length,128);assert.equal(Object.keys(saved.notes).length,128);assert.equal(durableJournal,undefined);
+ assert.ok(sizes.every(size=>size===0||size===128));
+ if(!failCheckpoint){assert.equal(clearWrites,0);assert.equal(done,128);}
+ for(const path of f.files.keys())assert.equal(f.times.get(path),originalTime);
+});
+
+test('batch wait expiry commits smaller complete batches without partial checkpoint retirement', async (t) => {
+ t.mock.timers.enable({ apis: ['Date'], now: originalTime });
+ const f=fixture();for(let n=0;n<4;n++)f.set(`wait${n}.md`,`body ${n}`);
+ const batches=[],sizes=[];let durableJournal,saved=emptyState(),started=0;
+ const commitBatch=f.api.commitBatch;
+ f.api.commitBatch=async inputs=>{batches.push(inputs.length);return commitBatch(inputs);};
+ const journal={atomicCheckpoint:true,current:()=>structuredClone(durableJournal),
+  write:async value=>{durableJournal=structuredClone(value);},clear:async()=>{durableJournal=undefined;}};
+ await f.engine({direction:'send',batchTransfer:true,batchFiles:128,batchWaitMs:1000,
+  checkpointSize:2,checkpointInterval:1000000,commitJournal:journal,
+  save:async(state,{retireCommit}={})=>{sizes.push(Object.keys(state.notes).length);saved=structuredClone(state);if(retireCommit)durableJournal=undefined;},
+  onTask:async event=>{
+   if(event.direction==='send'&&event.status==='running'&&++started===2)t.mock.timers.tick(1001);
+   if(event.status==='done')assert.ok(saved.notes[event.note]?.downloaded);
+  }}).run();
+ assert.deepEqual(batches,[2,2]);assert.ok(sizes.every(size=>[0,2,4].includes(size)));
+ assert.equal(Object.keys(saved.notes).length,4);assert.equal(durableJournal,undefined);
+ for(const path of f.files.keys())assert.equal(f.times.get(path),originalTime);
+});
+
 test('lightweight journals retain checkpoint batching and recover all uncheckpointed receipts after a restart', async () => {
  const f=fixture(),journal=journalStore();
  for(let n=0;n<80;n++)f.set(`n${n}.md`,`body ${n}`);

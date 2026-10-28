@@ -472,8 +472,8 @@ export class NotebookSynchronizer {
 	}
 	async #load(address) {
 		this.assertActive();
-		const task = this.#active,
-			before = task?.bytes ?? 0;
+		const task = this.#active;
+		let reported = 0;
 		if (this.#cachedObjects.has(address)) {
 			const bytes = this.#cachedObjects.get(address);
 			this.#cachedObjects.delete(address);
@@ -487,12 +487,13 @@ export class NotebookSynchronizer {
 		if (this.#windowManifests.has(address)) return this.#windowManifests.get(address);
 		const bytes = await this.timed('download', () => this.api.load(address, ({ loaded, total }) => {
 			if (!task) return;
-			task.bytes = before + loaded;
-			task.total = Math.max(task.total, before + total, task.bytes);
+			task.bytes += Math.max(0, loaded - reported);
+			reported = Math.max(reported, loaded);
+			task.total = Math.max(task.total, task.bytes + Math.max(0, total - loaded));
 			void this.onTask({ ...task, status: 'progress' }).catch(() => {});
 		}));
 		if (task) {
-			task.bytes = before + bytes.length;
+			task.bytes += Math.max(0, bytes.length - reported);
 			task.total = Math.max(task.total, task.bytes);
 			await this.onTask({ ...task, status: 'progress' });
 		}
@@ -558,9 +559,9 @@ export class NotebookSynchronizer {
 			return 1;
 		}
 	}
-	async #persist() {
+	async #persist(count = 1) {
 		unsavedStates.add(this.state);
-		this.#pendingSaves++;
+		this.#pendingSaves += count;
 		if (
 			!this.#batching ||
 			this.#pendingSaves >= this.checkpointSize ||
@@ -576,8 +577,9 @@ export class NotebookSynchronizer {
 			journal.entries.every(item => (this.state.notes[item.note]?.revision ?? 0) >= item.receipt.sequence);
 		if (retire) delete this.state.pendingCommit;
 		try {
-			await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state);
-			if (retire) await this.commitJournal.clear();
+			await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state,
+				retire && this.commitJournal.atomicCheckpoint === true ? { retireCommit: journal } : undefined);
+			if (retire) await this.commitJournal.clear({ checkpointed: this.commitJournal.atomicCheckpoint === true });
 		} catch (error) {
 			if (retire) this.state.pendingCommit = journal;
 			this.#checkpointFailed = true; throw error;
@@ -852,6 +854,8 @@ export class NotebookSynchronizer {
 			const wantsBytes =
 				force || info.path.toLowerCase().endsWith('.md') || info.path.startsWith('__smart_sync_configuration__/') || (this.attachmentLimit > 0 && info.bytes <= this.attachmentLimit);
 			if (wantsBytes) {
+				// Explicit attachment opens use a bounded window; background cycles retain their existing scheduling.
+				const downloadOptions = { concurrency: force ? 4 : 1, signal: this.api.signal };
 				const resumedLoad = info.bytes > 8 * 1024 * 1024 && this.api.resumeCache
 					? this.api.resumeCache.loader(load, info.segments.map(piece => piece.address)) : load;
 				if (
@@ -871,12 +875,13 @@ export class NotebookSynchronizer {
 						sinkFor,
 						info,
 						this.onTiming,
+						downloadOptions,
 					);
 				} else {
 					const file =
 						decoded ??
 						(await this.api.peerContents?.(entry.note, entry.manifest, info, undefined, this.onTiming)) ??
-						(await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, resumedLoad, info, this.onTiming));
+						(await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, resumedLoad, info, this.onTiming, downloadOptions));
 					this.assertActive();
 					const written = await this.host.write(info.path, file.contents, info.mtime);
 					if (typeof written?.stamp === 'string' && this.host.stamp && written.stamp === await this.host.stamp(info.path)) {
@@ -1270,6 +1275,7 @@ export class NotebookSynchronizer {
 		const used = new Set(Object.keys(this.state.notes));
 		let queuedBytes = 0, queuedStartedAt = 0;
 		const flushUploads = async () => {
+			const groupedCheckpoint = this.commitJournal && this.checkpointSize > 1;
 			const jobs = this.#queuedUploads.splice(0);
 			queuedBytes = 0;
 			queuedStartedAt = 0;
@@ -1301,8 +1307,10 @@ export class NotebookSynchronizer {
 					byPath.set(job.path, [job.id, this.state.notes[job.id]]);
 					if (job.contents !== undefined) rememberBase(this.state, job.id, job.contents);
 					this.#completed.push({ ...job.task, status: 'done', workMilliseconds: Math.max(0, performance.now() - job.task.workStartedAt), completedAt: performance.now() });
-					await this.#persist();
+					if (!groupedCheckpoint) await this.#persist();
 				}
+				// The durable intent covers the entire bounded batch until every receipt is applied.
+				if (groupedCheckpoint) await this.#persist(jobs.length);
 				await this.#finishCommit(false, true);
 			} catch (error) {
 				for (const job of jobs) await this.onTask({ ...job.task, status: 'failed', error }).catch(() => {});

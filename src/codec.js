@@ -369,44 +369,69 @@ async function measuredDecode(stage, work, onTiming) {
 	try { return await work(); }
 	finally { await Promise.resolve().then(() => onTiming?.(stage, performance.now() - started)).catch(() => undefined); }
 }
-async function* decodedSegments(keys, workspace, id, info, load, onTiming) {
-	const read = piece => Promise.resolve().then(() => load(piece.address)).then(body => ({ body }), error => ({ error }));
-	let pending = info.segments.length ? read(info.segments[0]) : undefined;
+function assertDownloadActive(options) {
+	if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException('Download stopped', 'AbortError');
+}
+async function* decodedSegments(keys, workspace, id, info, load, onTiming, options = {}) {
+	const width = Math.max(1, Math.min(4, Math.floor(options.concurrency) || 1));
+	const pending = new Map();
+	let failure;
+	const active = () => assertDownloadActive(options);
+	const read = index => {
+		if (index >= info.segments.length || failure || options.signal?.aborted) return;
+		pending.set(index, Promise.resolve().then(() => {
+			active();
+			return load(info.segments[index].address);
+		}).then(body => ({ body }), error => { failure ??= error ?? new Error('Segment download failed'); return { error: failure }; }));
+	};
 	try {
+		active();
+		for (let index = 0; index < width; index++) read(index);
 		for (const [index, piece] of info.segments.entries()) {
-			const result = await pending;
-			pending = undefined;
+			active();
+			if (!pending.has(index)) throw failure ?? new Error('Segment download did not start');
+			const result = await pending.get(index);
+			pending.delete(index);
+			active();
 			if (result.error) throw result.error;
 			if ((await measuredDecode('hash', () => fingerprint(result.body), onTiming)) !== piece.address)
 				throw Error('Encrypted object digest mismatch');
-			if (index + 1 < info.segments.length) pending = read(info.segments[index + 1]);
+			active();
+			read(index + width);
 			const bytes = await measuredDecode('decrypt', () => decryptObject(
 				keys, result.body, `ss2:${workspace}:${id}:segment:${index}`, piece.bytes,
 			), onTiming);
+			active();
 			if (bytes.length !== piece.bytes) throw Error('Segment length mismatch');
 			yield bytes;
 		}
-	} finally { if (pending) await pending; }
+	} finally { await Promise.all(pending.values()); pending.clear(); }
 }
-export async function unpackNote(keys, workspace, id, address, load, inspected, onTiming) {
+export async function unpackNote(keys, workspace, id, address, load, inspected, onTiming, options) {
+	assertDownloadActive(options);
 	const info = inspected ? reuseManifest(inspected, keys, workspace, id, address) : await inspectNote(keys, workspace, id, address, load);
+	assertDownloadActive(options);
 	const result = new Uint8Array(info.bytes);
 	let offset = 0;
-	for await (const data of decodedSegments(keys, workspace, id, info, load, onTiming)) {
+	for await (const data of decodedSegments(keys, workspace, id, info, load, onTiming, options)) {
 		result.set(data, offset);
 		offset += data.length;
 	}
 	if ((await measuredDecode('hash', () => fingerprint(result), onTiming)) !== info.digest) throw new Error('Note integrity check failed');
+	assertDownloadActive(options);
 	return { path: info.path, contents: result, digest: info.digest };
 }
 
-export async function unpackToSink(keys, workspace, id, address, load, sinkFor, inspected, onTiming) {
+export async function unpackToSink(keys, workspace, id, address, load, sinkFor, inspected, onTiming, options) {
+	assertDownloadActive(options);
 	const info = inspected ? reuseManifest(inspected, keys, workspace, id, address) : await inspectNote(keys, workspace, id, address, load);
+	assertDownloadActive(options);
 	const sink = await sinkFor(info.path, info.bytes, info.digest, info.mtime);
 	try {
-		for await (const bytes of decodedSegments(keys, workspace, id, info, load, onTiming)) {
+		for await (const bytes of decodedSegments(keys, workspace, id, info, load, onTiming, options)) {
 			await sink.write(bytes);
 		}
+		assertDownloadActive(options);
 		await sink.commit();
 		return { path: info.path, digest: info.digest };
 	} catch (error) {

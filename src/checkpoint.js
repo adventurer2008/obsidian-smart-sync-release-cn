@@ -152,6 +152,15 @@ export class ConnectionCheckpoints {
 		this.serial = work;
 		return work;
 	}
+	async saveAndRetireCommit(data, connectionId, journal) {
+		if (data.commitJournals?.[connectionId] !== journal) throw Error('Commit journal changed before checkpoint');
+		delete data.commitJournals[connectionId];
+		try { await this.save(data); }
+		catch (error) {
+			data.commitJournals[connectionId] = journal;
+			throw error;
+		}
+	}
 	async stage(kind, value) {
 		if (!await this.adapter.exists(this.folder)) await this.adapter.mkdir(this.folder);
 		const file = `${kind}-${crypto.randomUUID()}.json`;

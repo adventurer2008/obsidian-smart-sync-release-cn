@@ -428,7 +428,7 @@
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-overview-action > .setting-item-control { display:flex; flex-wrap:wrap; flex:1 1 auto; width:100%; max-width:100%; margin:0; gap:8px; }
 .smart-sync-overview-card .smart-sync-overview-action button { min-height:44px; height:auto; font-size:var(--font-ui-small); padding:9px 8px; border:1px solid var(--background-modifier-border); border-radius:8px; box-shadow:none; background:var(--background-primary); color:var(--text-normal); white-space:nowrap; }
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control { flex-wrap:nowrap; }
-.smart-sync-overview-card .smart-sync-manual-action button.mod-cta { flex:1 1 auto; background:var(--interactive-accent); color:var(--text-on-accent); border-color:var(--interactive-accent); }
+.smart-sync-overview-card .smart-sync-manual-action button.mod-cta { flex:1 1 auto; }
 .smart-sync-overview-card .smart-sync-manual-feedback { flex:0 0 100%; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
 .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:1 1 auto; }
 .smart-sync-common.smart-sync-overview-card > .smart-sync-lan-status { flex:1 1 100%; width:calc(100% + 40px); max-width:none; margin:0 -20px; padding:0 20px; border:0; border-top:1px solid var(--background-modifier-border); order:3; }
@@ -455,3 +455,37 @@
   .smart-sync-overview-card .smart-sync-devices-row button { flex-shrink:0; }
 }
 @media(max-width:370px) { .smart-sync-common.smart-sync-overview-card { padding:16px 16px 0; } .smart-sync-common.smart-sync-overview-card > .smart-sync-lan-status { width:calc(100% + 32px); margin-inline:-16px; padding-inline:16px; } }
+
+/* CHG-20261028-BUTTON-STYLE: reference-style outlined text actions, scoped to this plugin. */
+:is(.smart-sync-common, .smart-sync-dialog, .smart-sync-log-panel, .wujie-note-search, .wujie-encrypted, .wujie-crypto-form, .wujie-crypto-sheet-actions, .wujie-encryption-selection-tools) button:not(.clickable-icon) {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  padding-inline: 11px;
+  font-weight: var(--font-normal);
+}
+:is(.smart-sync-common, .smart-sync-dialog, .smart-sync-log-panel, .wujie-note-search, .wujie-encrypted, .wujie-crypto-form, .wujie-crypto-sheet-actions, .wujie-encryption-selection-tools) button:not(.clickable-icon):hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+}
+:is(.smart-sync-common, .smart-sync-dialog, .smart-sync-log-panel, .wujie-note-search, .wujie-encrypted, .wujie-crypto-form, .wujie-crypto-sheet-actions, .wujie-encryption-selection-tools) button:not(.clickable-icon):focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+:is(.smart-sync-common, .smart-sync-dialog, .smart-sync-log-panel, .wujie-note-search, .wujie-encrypted, .wujie-crypto-form, .wujie-crypto-sheet-actions, .wujie-encryption-selection-tools) button:not(.clickable-icon).mod-warning {
+  color: var(--text-error);
+}
+:is(.smart-sync-common, .smart-sync-dialog, .smart-sync-log-panel, .wujie-note-search, .wujie-encrypted, .wujie-crypto-form, .wujie-crypto-sheet-actions, .wujie-encryption-selection-tools) button:not(.clickable-icon):disabled {
+  color: var(--text-faint);
+  opacity: 0.6;
+  cursor: default;
+}
+/* Keep outlined actions readable on narrow covers at enlarged UI text sizes. */
+@container wujie (max-width:319px) {
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control { flex-wrap:wrap; }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:1 0 auto; min-width:max-content; }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-control button { white-space:normal; overflow-wrap:anywhere; }
+}

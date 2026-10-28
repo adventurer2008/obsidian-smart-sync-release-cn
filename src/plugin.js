@@ -1220,6 +1220,8 @@ export default class IndependentSync extends Plugin {
 			await this.downloadNoteAttachments(this.app.workspace.getActiveFile());
 	}
 	async downloadNoteAttachments(file) {
+		// New navigation supersedes queued work and stops the old note after its current attachment.
+		const request = this.attachmentOpenRequest = (this.attachmentOpenRequest ?? 0) + 1;
 		if (!(file instanceof TFile) || !file.path.toLowerCase().endsWith('.md')) return;
 		const settings = this.data.settings;
 		if (
@@ -1234,7 +1236,8 @@ export default class IndependentSync extends Plugin {
 		if (
 			this.stopped || this.stopping || this.data.manualSyncStopped ||
 			this.running ||
-			scope !== `${settings.origin}|${settings.workspace}` ||
+			request !== this.attachmentOpenRequest ||
+			scope !== `${this.data.settings.origin}|${this.data.settings.workspace}` ||
 			settings.attachmentMiB !== 0 ||
 			settings.direction === 'paused'
 		)
@@ -1277,6 +1280,7 @@ export default class IndependentSync extends Plugin {
 				this.ensureCurrent(api);
 				if (
 					this.stopped ||
+					request !== this.attachmentOpenRequest || this.stopping || this.data.manualSyncStopped ||
 					this.data.settings.direction === 'paused' ||
 					this.data.settings.attachmentMiB !== 0
 				)
@@ -2226,6 +2230,7 @@ export default class IndependentSync extends Plugin {
 			contentPriorities: this.contentPriorities.get(connectionId),
 			incrementalInventory: this.incrementalInventories.get(connectionId),
 			commitJournal: this.checkpoints ? {
+				atomicCheckpoint: true,
 				current: () => this.data.commitJournals?.[connectionId],
 				write: async journal => {
 					this.ensureCurrent(api);
@@ -2233,9 +2238,10 @@ export default class IndependentSync extends Plugin {
 					this.data.commitJournals[connectionId] = journal;
 					await this.checkpoints.saveConfiguration(this.data);
 				},
-				clear: async () => {
+				clear: async ({ checkpointed = false } = {}) => {
 					const journal = this.data.commitJournals?.[connectionId];
 					delete this.data.commitJournals?.[connectionId];
+					if (checkpointed) return;
 					try { await this.checkpoints.saveConfiguration(this.data); }
 					catch (error) { this.data.commitJournals[connectionId] = journal; throw error; }
 				},
@@ -2306,10 +2312,13 @@ export default class IndependentSync extends Plugin {
 				}
 				this.refreshTasks();
 			},
-			save: async (next) => {
+			save: async (next, { retireCommit } = {}) => {
 				this.data.connections[connectionId] = next;
 				this.data.tasks = this.journal.snapshot();
-				try { await this.measurePhase('checkpoint', () => this.saveData(this.data)); }
+				// One SDK descriptor commits both the applied state and retirement of its intent.
+				try { await this.measurePhase('checkpoint', () => retireCommit
+					? this.checkpoints.saveAndRetireCommit(this.data, connectionId, retireCommit)
+					: this.saveData(this.data)); }
 				catch (error) {
 					// Keep the dirty engine identity when a cloned SDK snapshot failed to commit.
 					this.data.connections[connectionId] = state;

@@ -11,6 +11,28 @@ function fixture(){
 }
 function data(){return{format:3,settings:{direction:'paused'},connections:{w:{format:3,cursor:0,notes:{a:{path:'a.md',digest:'old',base:'x'.repeat(10000)}},localIndex:{'a.md':'stamp'},conflicts:[]}}};}
 
+test('applied state and commit-journal retirement publish through one descriptor with no separate clear write', async () => {
+ const f=fixture(),store=f.store(),value=data(),journal={phase:'acknowledged',entries:[{note:'synthetic',receipt:{sequence:2}}]};
+ value.commitJournals={w:journal};await store.save(value);
+ let commits=0;const commit=store.commit;store.commit=async saved=>{commits++;await commit(saved)};
+ value.connections.w.cursor=2;
+ await store.saveAndRetireCommit(value,'w',journal);
+ assert.equal(commits,1);
+ const loaded=await f.store().load(f.durable());
+ assert.equal(loaded.connections.w.cursor,2);assert.equal(loaded.commitJournals.w,undefined);assert.equal(value.commitJournals.w,undefined);
+});
+
+for(const fault of ['write','rename','commit'])test(`atomic journal retirement ${fault} failure retains old durable intent and restores live retry`,async()=>{
+ const f=fixture(),store=f.store(),value=data(),journal={phase:'acknowledged',entries:[{note:'synthetic',receipt:{sequence:2}}]};
+ value.commitJournals={w:journal};await store.save(value);const old=structuredClone(f.durable());
+ value.connections.w.cursor=2;f.fail(fault);
+ await assert.rejects(store.saveAndRetireCommit(value,'w',journal),/fault/);
+ assert.equal(value.commitJournals.w,journal);assert.deepEqual(f.durable(),old);
+ const loaded=await f.store().load(old);assert.equal(loaded.connections.w.cursor,0);assert.deepEqual(loaded.commitJournals.w,journal);
+ f.fail();await store.saveAndRetireCommit(value,'w',journal);
+ assert.equal((await f.store().load(f.durable())).connections.w.cursor,2);assert.equal(f.durable().commitJournals.w,undefined);
+});
+
 test('metadata-only saves reuse the last committed connection snapshot and serialize behind queued saves',async()=>{
  const f=fixture(),store=f.store(),value=data();await store.save(value);const bytes=f.bytes();
  value.connections.w.cursor=1;value.settings.direction='both';await store.saveConfiguration(value);
