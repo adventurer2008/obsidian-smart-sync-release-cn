@@ -2,7 +2,7 @@ import { edition, assertEditionOrigin, logViewType } from './edition.js';
 import { mountBillingCard, capacityWarning } from './billing.js';
 import { t, locale, formatStorageSize, localizedFailure as failureMessage } from './i18n.js';
 import { ConnectionCheckpoints } from './checkpoint.js';
-import { notePinState, queueNotePin, moveNotePins, pinPathSet, synchronizeNotePins } from './pinning.js';
+import { notePinState, queueNotePosition, moveNotePins, pinPathSet, synchronizeNotePins } from './pinning.js';
 import { registerNoteSearch } from './search.js';
 import { registerNoteEncryption } from './note-encryption.js';
 import {
@@ -372,7 +372,7 @@ export function frontmatterUpdatedTime(frontmatter) {
 	}
 	return latest;
 }
-export function explorerComparator(options, readUpdated, readPinned) {
+export function explorerComparator(options, readUpdated, readPinned, readBottomed) {
 	const names = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
 	const dates = new WeakMap();
 	const folder = file => Array.isArray(file.children);
@@ -411,7 +411,8 @@ export function explorerComparator(options, readUpdated, readPinned) {
 	};
 	return (left, right) => {
 		const a = left.file ?? left, b = right.file ?? right;
-		const pinned = Number(readPinned?.(b) === true) - Number(readPinned?.(a) === true);
+		const rank = file => readPinned?.(file) === true ? -1 : readBottomed?.(file) === true ? 1 : 0;
+		const pinned = rank(a) - rank(b);
 		if (pinned) return pinned;
 		if (folder(a) !== folder(b) && options.grouping !== 'mixed')
 			return (folder(a) ? -1 : 1) * (options.grouping === 'files-first' ? -1 : 1);
@@ -462,7 +463,7 @@ export function explorerSortingAtDepth(value, depth = 1) {
 	return effective;
 }
 
-export function attachExplorerSorting(view, readOptions, readUpdated, readPinned) {
+export function attachExplorerSorting(view, readOptions, readUpdated, readPinned, readBottomed) {
 	if (typeof view?.getSortedFolderItems !== 'function' || typeof view.requestSort !== 'function') return undefined;
 	const own = Object.getOwnPropertyDescriptor(view, 'getSortedFolderItems');
 	const original = view.getSortedFolderItems;
@@ -478,8 +479,9 @@ export function attachExplorerSorting(view, readOptions, readUpdated, readPinned
 			title.classList.toggle('smart-sync-note-pinned', readPinned?.(item.file ?? item) === true);
 			decorated.add(title);
 		}
-		if (options.enabled) return items.slice().sort(explorerComparator(options, readUpdated, readPinned));
-		return readPinned ? items.slice().sort((a,b) => Number(readPinned(b.file ?? b) === true) - Number(readPinned(a.file ?? a) === true)) : items;
+		if (options.enabled) return items.slice().sort(explorerComparator(options, readUpdated, readPinned, readBottomed));
+		const rank = item => readPinned?.(item.file ?? item) === true ? -1 : readBottomed?.(item.file ?? item) === true ? 1 : 0;
+		return readPinned || readBottomed ? items.slice().sort((a,b) => rank(a) - rank(b)) : items;
 	};
 	view.getSortedFolderItems = wrapped;
 	return () => {
@@ -666,7 +668,7 @@ export default class IndependentSync extends Plugin {
 		if (this.app.vault.on)
 			for (const event of ['create', 'modify', 'delete', 'rename'])
 				this.registerEvent(this.app.vault.on(event, () => {
-					if (!this.data.settings.explorerSorting.enabled && !this.pinnedPaths?.size) return;
+					if (!this.data.settings.explorerSorting.enabled && !this.pinnedPaths?.size && !this.bottomedPaths?.size) return;
 					window.clearTimeout(this.explorerSortTimer);
 					this.explorerSortTimer = window.setTimeout(() => this.refreshExplorerSorting(), 150);
 				}));
@@ -675,6 +677,11 @@ export default class IndependentSync extends Plugin {
 			if (!this.canPinEntry(file)) return;
 			menu.addItem(item => item.setTitle(t(this.isNotePinned(file.path) ? 'pin.unpin' : 'pin.pin'))
 				.setIcon('pin').onClick(() => { void this.toggleNotePin(file).catch(error => this.notify(failureMessage(error))); }));
+			menu.addItem(item => item.setTitle(t(this.isNoteBottomed(file.path) ? 'pin.unbottom' : 'pin.bottom'))
+				.setIcon('arrow-down-to-line').onClick(() => { void this.setNoteBottoms([file], !this.isNoteBottomed(file.path)).catch(error => this.notify(failureMessage(error))); }));
+			if (file instanceof TFile && file.path.toLowerCase().endsWith('.md'))
+				menu.addItem(item => item.setTitle(t('history.contextMenu')).setIcon('history')
+					.onClick(() => { void this.history(undefined, file.path); }));
 		}));
 		if (workspace.on) this.registerEvent(workspace.on('files-menu', (menu, files) => {
 			const entries = files.filter(file => this.canPinEntry(file));
@@ -683,6 +690,11 @@ export default class IndependentSync extends Plugin {
 				if (!entries.some(file => this.isNotePinned(file.path) !== pinned)) continue;
 				menu.addItem(item => item.setTitle(t(pinned ? 'pin.pin' : 'pin.unpin')).setIcon('pin')
 					.onClick(() => { void this.setNotePins(entries, pinned).catch(error => this.notify(failureMessage(error))); }));
+			}
+			for (const bottomed of [true, false]) {
+				if (!entries.some(file => this.isNoteBottomed(file.path) !== bottomed)) continue;
+				menu.addItem(item => item.setTitle(t(bottomed ? 'pin.bottom' : 'pin.unbottom')).setIcon('arrow-down-to-line')
+					.onClick(() => { void this.setNoteBottoms(entries, bottomed).catch(error => this.notify(failureMessage(error))); }));
 			}
 		}));
 		if (this.app.vault.on) {
@@ -695,9 +707,9 @@ export default class IndependentSync extends Plugin {
 			this.registerEvent(this.app.vault.on('delete', file => {
 				const { pins, notes } = this.notePinContext();
 				let changed = false;
-				for (const path of pinPathSet(pins, notes)) if (path === file.path || path.startsWith(`${file.path}/`)) {
+				for (const path of new Set([...pinPathSet(pins, notes), ...pinPathSet(pins, notes, 'bottomed')])) if (path === file.path || path.startsWith(`${file.path}/`)) {
 					changed = true;
-					queueNotePin(pins, notes, path, false);
+					queueNotePosition(pins, notes, path, 'normal');
 					pins.pending[path].deleted = true;
 				}
 				if (!changed) return;
@@ -1074,7 +1086,7 @@ export default class IndependentSync extends Plugin {
 		const local = this.data.notePins.local;
 		if (binding !== 'local' && local) {
 			for (const operation of Object.values(local.pending).sort((a,b) => a.counter - b.counter))
-				if (!operation.deleted) queueNotePin(pins, {}, operation.path, operation.pinned);
+				if (!operation.deleted) queueNotePosition(pins, {}, operation.path, operation.bottomed ? 'bottom' : operation.pinned ? 'top' : 'normal');
 			delete this.data.notePins.local;
 		}
 		return { pins, notes: this.data.connections[binding]?.notes ?? {}, binding };
@@ -1082,6 +1094,10 @@ export default class IndependentSync extends Plugin {
 	isNotePinned(path) {
 		const { pins, notes } = this.notePinContext();
 		return pinPathSet(pins, notes).has(path);
+	}
+	isNoteBottomed(path) {
+		const { pins, notes } = this.notePinContext();
+		return pinPathSet(pins, notes, 'bottomed').has(path);
 	}
 	async toggleActiveNotePin() {
 		const file = this.app.workspace.getActiveFile();
@@ -1095,13 +1111,20 @@ export default class IndependentSync extends Plugin {
 		return (file instanceof TFile || file instanceof TFolder) && Boolean(file.path);
 	}
 	async setNotePins(files, pinned) {
+		return this.setNotePositions(pinned ? files : files.filter(file => this.isNotePinned(file.path)), pinned ? 'top' : 'normal');
+	}
+	async setNoteBottoms(files, bottomed) {
+		return this.setNotePositions(bottomed ? files : files.filter(file => this.isNoteBottomed(file.path)), bottomed ? 'bottom' : 'normal');
+	}
+	async setNotePositions(files, position) {
 		if (this.stopped) return;
+		const pinned = position === 'top', bottomed = position === 'bottom';
 		const { pins, notes } = this.notePinContext();
 		const changes = new Map();
 		for (const file of files) {
-			if (!this.canPinEntry(file) || changes.has(file.path) || this.isNotePinned(file.path) === pinned) continue;
+			if (!this.canPinEntry(file) || changes.has(file.path) || (this.isNotePinned(file.path) === pinned && this.isNoteBottomed(file.path) === bottomed)) continue;
 			const previous = pins.pending[file.path];
-			queueNotePin(pins, notes, file.path, pinned);
+			queueNotePosition(pins, notes, file.path, position);
 			changes.set(file.path, { previous, operation: pins.pending[file.path] });
 		}
 		if (!changes.size) return;
@@ -1114,14 +1137,15 @@ export default class IndependentSync extends Plugin {
 			throw error;
 		}
 		this.refreshExplorerSorting();
-		this.notify(t(pinned ? 'pin.pinnedPending' : 'pin.unpinnedPending'));
+		this.notify(t(bottomed ? 'pin.bottomedPending' : pinned ? 'pin.pinnedPending' : 'pin.normalPending'));
 		this.requestChangedSynchronization();
 	}
 	refreshExplorerSorting() {
 		if (this.stopped) return;
 		const { pins, notes } = this.notePinContext();
 		this.pinnedPaths = pinPathSet(pins, notes);
-		const enabled = this.data.settings.explorerSorting.enabled || this.pinnedPaths.size > 0;
+		this.bottomedPaths = pinPathSet(pins, notes, 'bottomed');
+		const enabled = this.data.settings.explorerSorting.enabled || this.pinnedPaths.size > 0 || this.bottomedPaths.size > 0;
 		const views = new Set((this.app.workspace.getLeavesOfType?.('file-explorer') ?? []).map(leaf => leaf.view));
 		for (const [view, detach] of this.explorerSortViews) {
 			if (!views.has(view) || !enabled) {
@@ -1133,7 +1157,7 @@ export default class IndependentSync extends Plugin {
 		for (const view of views) {
 			if (!this.explorerSortViews.has(view)) {
 				const detach = attachExplorerSorting(view, () => this.stopped ? { enabled: false } : this.data.settings.explorerSorting,
-					file => this.updatedNoteTime(file), file => !this.stopped && this.pinnedPaths.has(file.path));
+					file => this.updatedNoteTime(file), file => !this.stopped && this.pinnedPaths.has(file.path), file => !this.stopped && this.bottomedPaths.has(file.path));
 				if (detach) this.explorerSortViews.set(view, detach);
 			}
 			if (this.explorerSortViews.has(view)) view.requestSort();
@@ -2338,7 +2362,7 @@ export default class IndependentSync extends Plugin {
 			peers.provideNote = localNoteProvider({ keys, workspace: api.workspace, state, host: scopedHost, cache: receiveCache, accepts: path => !engine.excluded(path) });
 			api.peerContents = (note, manifest, info, sinkFor, onTiming) => receivePeerNote(peers, keys, api.workspace, note, manifest, info, sinkFor, onTiming);
 		}
-		return { api, keys, engine, host: scopedHost, pinsSupported: info.notePins === 1 };
+		return { api, keys, engine, host: scopedHost, pinsSupported: info.notePins === 1, positionsSupported: info.notePositions === 1 };
 	}
 	async exclusive(task) {
 		if (this.stopped) throw new Error('Plugin is unloaded');
@@ -2631,7 +2655,7 @@ export default class IndependentSync extends Plugin {
 					version: this.manifest.version,
 				});
 				if (!coalesceCycle) await this.persistTasks();
-				const { engine, keys, pinsSupported } = await this.connection({ allowIdleScan: automatic && !retryRow && !approval });
+				const { engine, keys, pinsSupported, positionsSupported } = await this.connection({ allowIdleScan: automatic && !retryRow && !approval });
 				if (engine.remoteMode === 'paused' || (!approval && engine.direction === 'paused')) {
 					this.journal.update(cycle, { status: 'skipped' });
 					await this.persistTasks();
@@ -2676,7 +2700,7 @@ export default class IndependentSync extends Plugin {
 				if (!pinsSupported && Object.keys(pins.pending).length) throw Object.assign(new Error('Pin service upgrade required'), { code: 'PIN_SERVICE_UPGRADE' });
 				if (pinsSupported) {
 					try {
-						await synchronizeNotePins({ api: engine.api, keys, state: pins, notes: engine.state.notes,
+						await synchronizeNotePins({ api: engine.api, keys, state: pins, notes: engine.state.notes, positions: positionsSupported,
 							direction: engine.remoteMode !== 'both' ? engine.remoteMode : engine.direction, save: () => this.saveData(this.data), active: () => {
 								this.ensureCurrent(engine.api); return !this.stopped;
 							} });
@@ -3191,9 +3215,29 @@ export default class IndependentSync extends Plugin {
 		return body;
 	}
 	renderTaskRows(area) {
-		this.taskStatusRows?.get(area)?.setText(t('task.stateLine', { state: this.taskSyncState() }));
-		area.empty();
-		if (this.taskSaveFailed) area.createEl('p', { text: t('msg_294afd29d6') });
+		const setText = (node, text) => { if (node.textContent !== text) node.setText(text); };
+		const status = this.taskStatusRows?.get(area);
+		if (status) setText(status, t('task.stateLine', { state: this.taskSyncState() }));
+		this.taskRowViews ??= new WeakMap();
+		let view = this.taskRowViews.get(area);
+		if (!view) {
+			area.empty();
+			view = { error: area.createEl('p'), summary: area.createEl('p'), page: area.createEl('p'), list: area.createDiv(), rows: new Map() };
+			const pagination = new Setting(area.createDiv());
+			bindAction(pagination, t('msg_c9b9ae7a61'), async () => {
+				this.taskPage = Math.max(0, (this.taskPage ?? 0) - 1); this.refreshTasks();
+			});
+			bindAction(pagination, t('msg_8a8542f696'), async () => {
+				this.taskPage = (this.taskPage ?? 0) + 1; this.refreshTasks();
+			});
+			const details = area.createEl('details');
+			details.createEl('summary', { text: t('task.recordDetails') });
+			details.createEl('p', { text: t('msg_1202d86812') });
+			view.diagnostics = details.createEl('p');
+			this.taskRowViews.set(area, view);
+		}
+		view.error.hidden = !this.taskSaveFailed;
+		setText(view.error, this.taskSaveFailed ? t('msg_294afd29d6') : '');
 		const all = this.journal.select(this.taskScope);
 		const cycle = [...all].reverse().find((row) => row.direction === 'cycle');
 		const batch = cycle
@@ -3203,8 +3247,7 @@ export default class IndependentSync extends Plugin {
 			['done', 'skipped', 'deferred'].includes(row.status),
 		).length;
 		const failed = batch.filter((row) => ['failed', 'interrupted'].includes(row.status)).length;
-		area.createEl('p', {
-			text: cycle
+		setText(view.summary, cycle
 				? t('msg_4bf9ffadb3', {
 						completed: completed,
 						length: batch.length,
@@ -3217,8 +3260,7 @@ export default class IndependentSync extends Plugin {
 									? t('msg_aa5d3b7313')
 									: t('msg_c96c0e3fa1'),
 					})
-				: t('msg_3e69303d70'),
-		});
+				: t('msg_3e69303d70'));
 		const names = {
 			send: t('msg_9e07e3c053'),
 			receive: t('msg_6e68458688'),
@@ -3234,47 +3276,43 @@ export default class IndependentSync extends Plugin {
 			deferred: t('msg_935fc43ed9'),
 			skipped: t('msg_fdfd26af96'),
 		};
-		const rows = this.journal.select(this.taskScope).slice().reverse();
+		const rows = all.slice().reverse();
 		this.taskPage = Math.min(this.taskPage ?? 0, Math.max(0, Math.ceil(rows.length / 50) - 1));
-		area.createEl('p', {
-			text: t('msg_26db91f789', {
+		setText(view.page, t('msg_26db91f789', {
 				length: rows.length,
 				value1: this.taskPage + 1,
 				value2: Math.max(1, Math.ceil(rows.length / 50)),
-			}),
-		});
-		for (const row of rows.slice(this.taskPage * 50, (this.taskPage + 1) * 50)) {
+			}));
+		const visible = rows.slice(this.taskPage * 50, (this.taskPage + 1) * 50);
+		const wanted = new Set(visible.map(row => row.id));
+		for (const [id, cached] of view.rows) if (!wanted.has(id)) { cached.node.remove(); view.rows.delete(id); }
+		for (const [index, row] of visible.entries()) {
 			const title =
 				row.direction === 'cycle'
 					? t('msg_d8876950ea')
 					: (this.journal.names.get(`${row.scope}:${row.note}`) ??
 						t('msg_3099d6379d', { value0: row.note.slice(0, 12) }));
-			area.createEl('p', {
-				text: `${new Date(row.started).toLocaleString(locale)} · ${names[row.direction]} · ${title} · ${states[row.status]} · ${formatStorageSize(row.bytes)}${row.direction === 'send' && row.total ? ` / ${formatStorageSize(row.total)} (${Math.floor((row.bytes / row.total) * 100)}%)` : ''}${row.status === 'running' && row.direction === 'receive' ? t('msg_c1a2a577cd') : ''}`,
-			});
-			if (row.skipReason === 'desktop-plugin') area.createEl('p', { text: this.journal.message(row) });
-			if (this.journal.canRetry(row, this.taskScope)) {
-				area.createEl('p', { text: this.journal.message(row) });
-				action(area, t('msg_a6d7a1c530'), async () => this.synchronize(row));
+			const text = `${new Date(row.started).toLocaleString(locale)} · ${names[row.direction]} · ${title} · ${states[row.status]} · ${formatStorageSize(row.bytes)}${row.direction === 'send' && row.total ? ` / ${formatStorageSize(row.total)} (${Math.floor((row.bytes / row.total) * 100)}%)` : ''}${row.status === 'running' && row.direction === 'receive' ? t('msg_c1a2a577cd') : ''}`;
+			const retry = this.journal.canRetry(row, this.taskScope), skipped = row.skipReason === 'desktop-plugin';
+			const message = retry || skipped ? this.journal.message(row) : '';
+			const signature = JSON.stringify([this.taskScope, text, retry, skipped, message]);
+			let cached = view.rows.get(row.id);
+			if (!cached) { cached = { node: view.list.createDiv() }; view.rows.set(row.id, cached); }
+			if (cached.signature !== signature) {
+				cached.node.empty();
+				cached.node.createEl('p', { text });
+				if (skipped) cached.node.createEl('p', { text: message });
+				if (retry) {
+					cached.node.createEl('p', { text: message });
+					action(cached.node, t('msg_a6d7a1c530'), async () => this.synchronize(row));
+				}
+				cached.signature = signature;
 			}
+			if (view.list.children[index] !== cached.node) view.list.insertBefore(cached.node, view.list.children[index] ?? null);
 		}
-		const pagination = new Setting(area.createDiv());
-		bindAction(pagination, t('msg_c9b9ae7a61'), async () => {
-			this.taskPage = Math.max(0, (this.taskPage ?? 0) - 1);
-			this.refreshTasks();
-		});
-		bindAction(pagination, t('msg_8a8542f696'), async () => {
-			this.taskPage = (this.taskPage ?? 0) + 1;
-			this.refreshTasks();
-		});
-		const details = area.createEl('details');
-		details.createEl('summary', { text: t('task.recordDetails') });
-		details.createEl('p', { text: t('msg_1202d86812') });
-		details.createEl('p', {
-			text: t('msg_b4391a4866', {
+		setText(view.diagnostics, t('msg_b4391a4866', {
 				value0: this.diagnosticPending ?? this.data.taskOutbox?.length ?? 0,
-			}),
-		});
+			}));
 	}
 	logEvent(text) {
 		this.events.push({ at: Date.now(), text });

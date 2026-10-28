@@ -452,3 +452,14 @@ export async function decryptNotePin(keys, workspace, note, value) {
 	if (clear.length !== 1 || clear[0] > 1) throw Error('Invalid note pin');
 	return clear[0] === 1;
 }
+
+export async function encryptNotePosition(keys, workspace, note, position) {
+	if (!/^[a-f0-9]{64}$/.test(note) || !['normal', 'top', 'bottom'].includes(position)) throw Error('Invalid note position');
+	return base64((await encryptObject(keys, Uint8Array.of(['normal', 'top', 'bottom'].indexOf(position)), `note-position-1|${workspace}|${note}`)).body);
+}
+export async function decryptNotePosition(keys, workspace, note, value) {
+	if (!/^[a-f0-9]{64}$/.test(note) || typeof value !== 'string' || value.length > 512) throw Error('Invalid note position');
+	const clear = await decryptObject(keys, unbase64(value), `note-position-1|${workspace}|${note}`, 64);
+	if (clear.length !== 1 || clear[0] > 2) throw Error('Invalid note position');
+	return ['normal', 'top', 'bottom'][clear[0]];
+}

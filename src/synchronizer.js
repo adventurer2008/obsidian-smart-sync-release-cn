@@ -504,24 +504,30 @@ export class NotebookSynchronizer {
 		return (previous?.revision ?? 0) >= entry.sequence &&
 			(previous.revision !== entry.sequence || previous.downloaded || previous.removed || entry.removed || this.excluded(previous.path));
 	}
-	async #prefetch(entries) {
-		this.#cachedObjects.clear();
-		this.#prefetchedInfo.clear();
-		if (!this.batchTransfer || typeof this.api.loadBatch !== 'function') return entries.length;
+	async #prefetch(entries, retained = new Map()) {
+		// Prepare a private window. Read-ahead must never replace the active
+		// receiver's caches or mutate its task, cursor or checkpoint state.
+		const window = { cached: new Map(), manifests: new Map(), info: new Map(), covered: entries.length };
+		// Priority inspection may already have fetched a rename manifest. Keep
+		// its bounded authenticated bytes even when batch transfer is disabled.
+		const wantedRetained = new Set(entries.filter(entry => !entry.removed).map(entry => entry.manifest));
+		let retainedBudget = 128 * 1024;
+		for (const [address, body] of retained) if (wantedRetained.has(address) && body.length <= retainedBudget) {
+			window.manifests.set(address, body); retainedBudget -= body.length;
+		}
+		if (!this.batchTransfer || typeof this.api.loadBatch !== 'function') return window;
 		const live = entries.filter(entry => !entry.removed && !this.#alreadyApplied(entry));
-		if (!live.length) { this.#windowManifests.clear(); return entries.length; }
+		if (!live.length) return window;
 		try {
 			const wanted = new Set(live.map(entry => entry.manifest));
-			for (const address of this.#windowManifests.keys()) if (!wanted.has(address)) this.#windowManifests.delete(address);
-			const manifests = new Map(this.#windowManifests);
+			const manifests = new Map([...retained].filter(([address]) => wanted.has(address)));
 			const missing = [...wanted].filter(address => !manifests.has(address));
 			const remaining = this.batchBytes - 128 * 1024 - [...manifests.values()].reduce((sum, body) => sum + body.length, 0);
-			if (missing.length && remaining < 1024) { this.#windowManifests.clear(); return 1; }
+			if (missing.length && remaining < 1024) { window.covered = 1; return window; }
 			if (missing.length) for (const [address, body] of await this.timed('download', () => this.api.loadBatch(missing, remaining))) manifests.set(address, body);
-			this.#windowManifests.clear();
 			let metadataBudget = 128 * 1024;
-			for (const [address, body] of manifests) if (body.length <= metadataBudget) { this.#windowManifests.set(address, body); metadataBudget -= body.length; }
-			this.#cachedObjects = manifests;
+			for (const [address, body] of manifests) if (body.length <= metadataBudget) { window.manifests.set(address, body); metadataBudget -= body.length; }
+			window.cached = manifests;
 			let available = this.batchBytes - 128 * 1024 - [...manifests.values()].reduce((sum, body) => sum + body.length, 0);
 			const pieces = new Set();
 			let covered = 0;
@@ -531,7 +537,7 @@ export class NotebookSynchronizer {
 				let info;
 				try { info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async address => manifests.get(address)); }
 				catch { covered++; continue; } // The ordinary per-file task performs and reports the integrity failure.
-				this.#prefetchedInfo.set(entry.note + entry.manifest, info);
+				window.info.set(entry.note + entry.manifest, info);
 				const previous = this.state.notes[entry.note];
 				// Reuse the local body for path-only revisions. The receive path still
 				// checks local content and fetches on demand if it is absent or changed.
@@ -549,14 +555,12 @@ export class NotebookSynchronizer {
 				}
 				covered++;
 			}
-			if (pieces.size) for (const [address, bytes] of await this.timed('download', () => this.api.loadBatch([...pieces], this.batchBytes))) this.#cachedObjects.set(address, bytes);
-			return Math.max(1, covered);
+			if (pieces.size) for (const [address, bytes] of await this.timed('download', () => this.api.loadBatch([...pieces], this.batchBytes))) window.cached.set(address, bytes);
+			window.covered = Math.max(1, covered);
+			return window;
 		} catch (error) {
-			this.#cachedObjects.clear();
-			this.#windowManifests.clear();
-			this.#prefetchedInfo.clear();
 			if (error?.status === 401 || error?.status === 403 || error?.name === 'AbortError') throw error;
-			return 1;
+			return { cached: new Map(), manifests: new Map(), info: new Map(), covered: 1 };
 		}
 	}
 	async #persist(count = 1) {
@@ -1119,8 +1123,8 @@ export class NotebookSynchronizer {
 			}
 			await this.#stageTreeDeletions(current);
 			await this.#removeCompleteTrees(current.filter(entry => !this.#heldTree(entry.note)));
-			let windowIndex = 0, nextPrefetch = 0;
-			for (const entry of changes) {
+			let windowIndex = 0, nextPrefetch = 0, ahead;
+			try { for (const entry of changes) {
 				if (!targets && ceiling === undefined) await this.#prioritizeContent();
 				const held = this.#heldTree(entry.note);
 				if (held && heads.get(entry.note) === entry) {
@@ -1144,7 +1148,24 @@ export class NotebookSynchronizer {
 				if (windowIndex >= nextPrefetch) {
 					if (windowIndex > 0) await this.#contentPoll?.();
 					const windowEntries = current.slice(windowIndex, windowIndex + this.batchFiles);
-					if (!windowEntries.some(item => item.removed)) nextPrefetch = windowIndex + await this.#prefetch(windowEntries);
+					if (!windowEntries.some(item => item.removed)) {
+						const matches = ahead?.index === windowIndex;
+						const pending = ahead ? await ahead.promise : undefined;
+						if (pending?.error) throw pending.error;
+						const prepared = matches ? pending : undefined;
+						ahead = undefined;
+						const window = prepared?.window ?? await this.#prefetch(windowEntries, this.#windowManifests);
+						this.#cachedObjects = window.cached;
+						this.#windowManifests = window.manifests;
+						this.#prefetchedInfo = window.info;
+						nextPrefetch = windowIndex + window.covered;
+						const next = current.slice(nextPrefetch, nextPrefetch + this.batchFiles);
+						if (this.batchTransfer && next.length && !next.some(item => item.removed)) {
+							// One next window only; receive/write/checkpoint remain serial.
+							ahead = { index: nextPrefetch, promise: this.#prefetch(next, window.manifests)
+								.then(window => ({ window }), error => ({ error })) };
+						}
+					}
 				}
 				this.onProgress(t('msg_f6a511393c', { sequence: entry.sequence }));
 				await this.#receive(entry);
@@ -1153,6 +1174,9 @@ export class NotebookSynchronizer {
 				this.state.cursor = Math.max(this.state.cursor, entry.sequence);
 				await this.#persist();
 				replayCursorDirty = false;
+			} } finally {
+				// Settle speculative reads before run cleanup, including failed receives.
+				if (ahead) await ahead.promise;
 			}
 			// Unapplied revisions remain in the durable retry queue. Skipped
 			// history after the final applied change needs only one checkpoint.

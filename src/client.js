@@ -153,6 +153,8 @@ export function failureMessage(error) {
 		429: 'Too many requests. Wait a minute before retrying.',
 	};
 	if (messages[error?.status]) return messages[error.status];
+	if (error?.code === 'PIN_SERVICE_UPGRADE')
+		return 'Upgrade the synchronization service to sync note positions. Local pin and bottom changes remain pending.';
 	if (error?.code === 'RENAME_CONFLICT')
 		return 'Rename conflict: both versions are preserved. Move aside the occupied destination or choose the same name on both devices, then retry.';
 	if (error?.code === 'WRONG_NOTEBOOK_KEY')
@@ -252,6 +254,12 @@ export class WorkspaceApi {
 	}
 	setPin(note, input) {
 		return this.request('PUT', this.scope(`pins/${note}`), input);
+	}
+	positions(after = 0) {
+		return this.request('GET', this.scope(`positions?after=${after}`));
+	}
+	setPosition(note, input) {
+		return this.request('PUT', this.scope(`positions/${note}`), input);
 	}
 	feed(after) {
 		return this.request('GET', this.scope(`changes?after=${after}`));

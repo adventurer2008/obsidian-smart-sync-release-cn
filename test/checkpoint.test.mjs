@@ -11,6 +11,22 @@ function fixture(){
 }
 function data(){return{format:3,settings:{direction:'paused'},connections:{w:{format:3,cursor:0,notes:{a:{path:'a.md',digest:'old',base:'x'.repeat(10000)}},localIndex:{'a.md':'stamp'},conflicts:[]}}};}
 
+test('unchanged primitive records reuse serialization while in-place edits, removed keys and nested mutations remain durable', async () => {
+ const f=fixture(),store=f.store(),value=data();
+ value.connections.w.notes.nested={path:'nested.md',origin:{device:'before'}};
+ await store.save(value);
+ const key=JSON.stringify(['w','notes','a']),captured=store.recordEncodings.get(key);
+ value.connections.w.cursor=1;await store.save(value);
+ assert.equal(store.recordEncodings.get(key),captured);
+ value.connections.w.notes.a.digest='changed';delete value.connections.w.notes.a.base;
+ value.connections.w.notes.nested.origin.device='after';
+ await store.save(value);assert.notEqual(store.recordEncodings.get(key),captured);
+ assert.deepEqual(await f.store().load(f.durable()),value);
+ delete value.connections.w.notes.a;await store.save(value);
+ assert.equal(store.recordEncodings.has(key),false);
+ assert.deepEqual(await f.store().load(f.durable()),value);
+});
+
 test('applied state and commit-journal retirement publish through one descriptor with no separate clear write', async () => {
  const f=fixture(),store=f.store(),value=data(),journal={phase:'acknowledged',entries:[{note:'synthetic',receipt:{sequence:2}}]};
  value.commitJournals={w:journal};await store.save(value);

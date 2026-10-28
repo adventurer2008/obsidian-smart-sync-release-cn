@@ -484,6 +484,17 @@
   cursor: default;
 }
 /* Keep outlined actions readable on narrow covers at enlarged UI text sizes. */
+/* CHG-20261028-SYNC-ACCENT: retain the established primary sync action color. */
+.smart-sync-overview-card .smart-sync-manual-action button.mod-cta:not(.clickable-icon) {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+.smart-sync-overview-card .smart-sync-manual-action button.mod-cta:not(.clickable-icon):hover:not(:disabled) {
+  background: var(--interactive-accent-hover, var(--interactive-accent));
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent-hover, var(--interactive-accent));
+}
 @container wujie (max-width:319px) {
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control { flex-wrap:wrap; }
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:1 0 auto; min-width:max-content; }

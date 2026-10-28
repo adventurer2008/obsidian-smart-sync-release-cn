@@ -4,6 +4,19 @@ const encoder = new TextEncoder();
 const filename = /^(?:base|patch|archive)-[a-f0-9-]{36}\.json$/;
 const own = (object, key, value) => Object.defineProperty(object, key, { value, enumerable: true, writable: true, configurable: true });
 
+function encodeRecord(value, previous) {
+	// Notes and local-index records normally contain only primitive fields.
+	// Compare those fields, not object identity: the engine updates records in place.
+	// Unknown/nested shapes always use the original serializer to observe mutations.
+	if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype)
+		return { text: JSON.stringify(value) };
+	const keys = Object.keys(value);
+	if (keys.some(key => value[key] !== null && ['object', 'function'].includes(typeof value[key])))
+		return { text: JSON.stringify(value) };
+	if (previous?.keys?.length === keys.length && keys.every((key, index) => key === previous.keys[index] && Object.is(value[key], previous.values[index]))) return previous;
+	return { keys, values: keys.map(key => value[key]), text: JSON.stringify(value) };
+}
+
 // Immutable files are staged before the small SDK configuration commits their
 // descriptor. An interrupted/failed write can never publish an incomplete delta.
 export class ConnectionCheckpoints {
@@ -17,15 +30,24 @@ export class ConnectionCheckpoints {
 		this.deltaBytes = 0;
 		this.archiveEntries = new WeakMap();
 		this.lastConfiguration = undefined;
+		this.recordEncodings = new Map();
 	}
 	encode(connections) {
 		const result = new Map();
+		const encodings = new Map();
 		for (const [id, state] of Object.entries(connections)) {
 			const { notes = {}, localIndex = {}, ...rest } = state;
 			result.set(JSON.stringify([id]), JSON.stringify(rest));
 			for (const [kind, values] of [['notes', notes], ['localIndex', localIndex]])
-				for (const key in values) if (Object.hasOwn(values, key)) result.set(JSON.stringify([id, kind, key]), JSON.stringify(values[key]));
+				for (const key in values) if (Object.hasOwn(values, key)) {
+					const recordKey = JSON.stringify([id, kind, key]);
+					const encoded = encodeRecord(values[key], this.recordEncodings.get(recordKey));
+					encodings.set(recordKey, encoded);
+					result.set(recordKey, encoded.text);
+				}
 		}
+		// Keep only the current capture, including after deletions/workspace changes.
+		this.recordEncodings = encodings;
 		return result;
 	}
 	decode(records) {
