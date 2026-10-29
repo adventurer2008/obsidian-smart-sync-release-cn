@@ -683,7 +683,8 @@ export class NotebookSynchronizer {
 		this.#receivePaths.set(entry.note, info.path);
 		let decoded;
 		if (!entry.removed && this.host.validationContent?.(info.path)) decoded = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info);
-		const skipReason = await this.host.validateReceive?.(info.path, decoded?.contents);
+		// Tombstones install no code; a deleted manifest cannot establish compatibility.
+		const skipReason = !entry.removed && await this.host.validateReceive?.(info.path, decoded?.contents);
 		if (skipReason === 'desktop-plugin') {
 			this.#active.skipReason = skipReason;
 			this.state.notes[entry.note] = { path: info.path, kind: info.kind, revision: entry.sequence, digest: info.digest, manifest: entry.manifest, removed: entry.removed, downloaded: false, platformSkipped: skipReason };

@@ -87,6 +87,9 @@ export function createBackgroundTray({ load, name, vaultName, labels, renderer, 
 		renderer.addEventListener('pagehide', finishUnload, true);
 		renderer.addEventListener('unload', finishUnload, true);
 		if (priorThrottle !== undefined) contents.setBackgroundThrottling(false);
-		return { dispose };
+		return { dispose, hide() {
+			if (!alive() || !tray || tray.isDestroyed()) return false;
+			win.hide(); hidden = true; return true;
+		} };
 	} catch (error) { dispose(); throw error; }
 }

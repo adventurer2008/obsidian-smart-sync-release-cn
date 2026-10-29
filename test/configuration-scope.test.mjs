@@ -46,6 +46,17 @@ test('product language catalogs contain no development-stage test-vault prompts'
 	assert.equal(t('version.value', { version: '0.1.12' }), '当前版本 0.1.12');
 });
 
+test('startup preferences and sync identities cannot be transferred by plugin-data sync across desktop or mobile scopes', () => {
+	for (const ownId of ['wujie-sync', 'smart-sync-global']) for (const mobile of [false, true]) {
+		const scope = configurationScope({ plugins:'all', pluginCode:true, pluginData:true, ownId, mobile });
+		for (const id of ['wujie-sync','smart-sync-global']) {
+			assert.equal(scope.allowed(`plugins/${id}/data.json`),false);
+			assert.equal(scope.allowed(`plugins/${id}/main.js`),false);
+		}
+		assert.equal(scope.allowed('plugins/synthetic-other/data.json'),true);
+	}
+});
+
 test('granular scope separates each plugin code/data and category while protecting own state and enable lists', () => {
 	const c = cleanConfiguration({
 		editor: true,

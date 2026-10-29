@@ -484,6 +484,38 @@
   cursor: default;
 }
 /* Keep outlined actions readable on narrow covers at enlarged UI text sizes. */
+/* CHG-20261028-NOTEBOOK-COMPACT: scope layout changes to notebook management. */
+.smart-sync-notebooks > p { margin: 4px 0 10px; }
+.smart-sync-notebooks .setting-item.smart-sync-notebook-toolbar {
+  padding: 6px 0 10px;
+  border-top: 0;
+  gap: 6px;
+}
+.smart-sync-notebooks .smart-sync-notebook-toolbar > .setting-item-info { display: none; }
+.smart-sync-notebooks .smart-sync-notebook-toolbar > .setting-item-control {
+  justify-content: flex-start;
+  flex: 1 1 100%;
+  gap: 6px;
+}
+.smart-sync-notebooks .setting-item.smart-sync-notebook-row {
+  padding: 10px 0;
+  gap: 8px 12px;
+  align-items: center;
+}
+.smart-sync-notebooks .setting-item.smart-sync-notebook-row > .setting-item-info {
+  flex: 1 1 10rem;
+  margin-inline-end: 0;
+}
+.smart-sync-notebooks .smart-sync-notebook-row .setting-item-description { margin-top: 3px; }
+.smart-sync-notebooks .smart-sync-notebook-row > .setting-item-control {
+  width: auto;
+  gap: 6px;
+}
+.smart-sync-notebooks button:not(.clickable-icon) {
+  min-height: 30px;
+  padding: 4px 10px;
+}
+.is-mobile .smart-sync-notebooks button:not(.clickable-icon) { min-height: 44px; }
 /* CHG-20261028-SYNC-ACCENT: retain the established primary sync action color. */
 .smart-sync-overview-card .smart-sync-manual-action button.mod-cta:not(.clickable-icon) {
   background: var(--interactive-accent);

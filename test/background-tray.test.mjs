@@ -51,6 +51,15 @@ test('closing keeps this vault alive; branded icon restores minimized windows an
 	assert.equal(f.contents.listenerCount('will-prevent-unload'), 0);
 });
 
+test('explicit startup hide requires a live tray, affects only its window, and restores reachability on disposal', () => {
+	const f = fixture(), other = fixture(), controller = f.open(), second = other.open();
+	assert.equal(f.win.visible, true); assert.equal(other.win.visible, true);
+	assert.equal(controller.hide(), true); assert.equal(f.win.visible, false); assert.equal(other.win.visible, true);
+	f.tray().emit('click'); assert.equal(f.win.visible, true);
+	controller.hide(); controller.dispose(); assert.equal(f.win.visible, true); assert.equal(controller.hide(), false);
+	second.dispose();
+});
+
 test('explicit vault close, application quit and system shutdown bypass interception; tray restoration resumes background use after deferred unload', () => {
 	for (const quit of [f => f.menu()[2].click(), f => f.app.quit(), f => f.win.emit('query-session-end'), f => f.win.emit('session-end')]) {
 		const f = fixture(), controller = f.open();

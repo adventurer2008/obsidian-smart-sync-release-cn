@@ -29,7 +29,7 @@ function fixture(t) {
 	t.mock.method(window, 'clearInterval', id => timers.delete(id));
 	const plugin = { data: { localId: 'synthetic', settings: { origin: 'https://example.invalid', workspace: '', direction: 'both', interval: 60, excludedExtensions: [], configuration: cleanConfiguration({}) } },
 		manifest: { version: '1.0.5' }, status: { text: 'Disconnected' }, secret: () => '', registerInterval() {},
-		lanSummary: (details = false) => details ? '局域网已收 1 KB · 回退 3 次' : 'Offline', checkClientVersion: async () => undefined, statusListeners: new Set(),
+		lanSummary: (details = false) => details ? '局域网已收 1 KB' : 'Offline', checkClientVersion: async () => undefined, statusListeners: new Set(),
 		setting: async (key, value) => { plugin.data.settings[key] = value; } };
 	const tab = new IndependentSettings({}, plugin); tab.containerEl = dom.window.document.querySelector('main');
 	t.after(() => { tab.hide(); dom.window.close(); });
@@ -95,7 +95,7 @@ test('reusing the native LAN row replaces old details and displays only the curr
 	const { tab, plugin, timers } = fixture(t);
 	plugin.data.settings.workspace = 'synthetic';
 	let state = '暂无直连，使用云端';
-	plugin.lanSummary = details => details ? `${state}；回退 3 次` : state;
+	plugin.lanSummary = details => details ? `${state}；局域网已收 1 KB` : state;
 	const setting = new Setting(tab.containerEl);
 	let dispose;
 	for (let refresh = 0; refresh < 4; refresh++) {
@@ -130,7 +130,8 @@ test('legacy host renders all shared definitions offline, refreshes and releases
 	assert.equal(connectionDetails.querySelector('.smart-sync-lan-title').textContent, '局域网连接状态');
 	assert.equal(connectionDetails.querySelector('.smart-sync-lan-state').textContent, 'Offline');
 	assert.equal(connectionDetails.querySelector('.smart-sync-lan-entry').textContent, '连接详情');
-	assert.match(connectionDetails.textContent, /局域网已收 1 KB.*回退 3 次/);
+	assert.match(connectionDetails.textContent, /局域网已收 1 KB/);
+	assert.doesNotMatch(connectionDetails.textContent, /回退|直连未取得内容/);
 	connectionDetails.open = true;
 	connectionDetails.dispatchEvent(new connectionDetails.ownerDocument.defaultView.Event('toggle'));
 	assert.equal(tab.containerEl.querySelectorAll('.smart-sync-overview-card').length, 1);
@@ -182,6 +183,36 @@ test('tray changes persist before runtime changes; failed storage preserves the 
 	await IndependentSync.prototype.setting.call(plugin, 'backgroundTray', false);
 	assert.equal(plugin.data.settings.backgroundTray, false); assert.equal(refreshed, 1);
 	assert.equal(plugin.data.manualSyncStopped, true);
+});
+
+test('launch to tray is opt-in inside Advanced on Windows only, follows tray settings and preserves the toggle after failure', async t => {
+	const { tab, plugin } = fixture(t), original = window.require;
+	window.require = name => { assert.equal(name, 'node:process'); return { platform: 'win32' }; };
+	try {
+		const advanced = tab.getSettingDefinitions().find(group => group.items?.some(item => item.name === '开机后自动运行并最小化到托盘'));
+		assert.ok(advanced); const index = advanced.items.findIndex(item => item.name === '开机后自动运行并最小化到托盘');
+		assert.equal(advanced.items[index - 1].name, '后台运行与托盘');
+		tab.display();
+		const row = [...tab.containerEl.querySelectorAll('.setting-item')].find(el => el.setting.name === '开机后自动运行并最小化到托盘');
+		const toggle = row.setting.controls.find(control => control.kind === 'toggle'); assert.equal(toggle.value, false);
+		await toggle.change(true); assert.equal(plugin.data.settings.launchAtLogin, true);
+		Platform.isMobile = true;
+		assert.ok(!tab.getSettingDefinitions().some(group => group.items?.some(item => item.name === '开机后自动运行并最小化到托盘')));
+		Platform.isMobile = false; window.require = () => ({ platform: 'darwin' });
+		assert.ok(!tab.getSettingDefinitions().some(group => group.items?.some(item => item.name === '开机后自动运行并最小化到托盘')));
+	} finally { window.require = original; Platform.isMobile = false; }
+});
+
+test('a copied startup flag with no native registration displays off instead of falsely activated', t => {
+	const { tab, plugin } = fixture(t), original = window.require;
+	window.require = () => ({ platform:'win32' });
+	plugin.data.settings.launchAtLogin = true; plugin.startupStatus = false;
+	try {
+		tab.display();
+		const row = [...tab.containerEl.querySelectorAll('.setting-item')].find(el=>el.setting.name==='开机后自动运行并最小化到托盘');
+		assert.equal(row.setting.controls.find(control=>control.kind==='toggle').value,false);
+		assert.equal(row.setting.desc,'这台电脑的开机启动尚未设置好，请关闭此选项后重新打开。');
+	} finally { window.require=original; }
 });
 
 test('attachment selector restores the saved value and reports a rejected change', async t => {

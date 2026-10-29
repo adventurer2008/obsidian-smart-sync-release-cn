@@ -68,6 +68,27 @@ test('mobile skips every desktop-only plugin file in any order and continues not
 	}
 });
 
+test('deleted plugin manifests and code need no mobile compatibility and do not block later notes', async () => {
+	for (const mobile of [true, false]) {
+		const f = await fixture([
+			[prefix + 'plugins/removed-tool/manifest.json', { isDesktopOnly: true }],
+			[prefix + 'plugins/removed-tool/main.js', 'desktop code'],
+			['after-delete.md', 'still synchronizes'],
+		], mobile);
+		f.entries[0].removed = true;
+		f.entries[1].removed = true;
+		await f.run();
+		assert.equal(f.state().cursor, 3);
+		assert.equal(f.notes.has('after-delete.md'), true);
+		assert.equal(f.mtimes.get('after-delete.md'), 1577836800123);
+		assert.equal(f.files.size, 0);
+		assert.equal(f.commits(), 0);
+		assert.equal(f.events.some(event => event.status === 'failed'), false);
+		f.restart(); await f.run();
+		assert.equal(f.state().cursor, 3);
+	}
+});
+
 test('mobile enable state filters desktop plugins locally while preserving shared desktop enable entries', async () => {
 	const f = await fixture([[prefix + 'community-plugins.json', ['desktop-tool', 'mobile-tool']],
 		[prefix + 'plugins/desktop-tool/manifest.json', { isDesktopOnly: true }],

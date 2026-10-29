@@ -16,7 +16,7 @@ test('LAN overview shows state only while connection details retain measured pay
     assert.doesNotMatch(summary(), /KB|回退|已收/);
     const text = summary(true);
     assert.match(text, /已直连 2 台设备/); assert.match(text, /已收 1 KB、已发 2 KB/);
-    assert.match(text, /云端已收 4 KB/); assert.match(text, /回退 3 次/);
+    assert.match(text, /云端已收 4 KB/); assert.doesNotMatch(text, /回退|fallback/i);
     plugin.data.settings.lanAcceleration = false; assert.match(summary(), /已关闭/);
     plugin.data.settings.workspace = ''; assert.match(summary(), /尚未连接/);
 });

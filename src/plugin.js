@@ -1,4 +1,6 @@
 import { edition, assertEditionOrigin, logViewType } from './edition.js';
+import * as ObsidianSdk from 'obsidian';
+import { androidFallback, supportsAndroidNativeVersion } from './android-transport.js';
 import { mountBillingCard, capacityWarning } from './billing.js';
 import { t, locale, formatStorageSize, localizedFailure as failureMessage } from './i18n.js';
 import { ConnectionCheckpoints } from './checkpoint.js';
@@ -57,6 +59,7 @@ import { sampleVaultSize, LanPeers, intersectDirection, bindLanTransfers, localN
 import { ReceiveCache } from './resume.js';
 import { desktopFiles } from './desktop.js';
 import { createBackgroundTray } from './background-tray.js';
+import { windowsStartupSupported, windowsStartup, startupRequestMatches } from './startup.js';
 import {
 	emptyState,
 	IncrementalInventory,
@@ -304,6 +307,7 @@ const defaults = () => ({
 	recentEnabled: true,
 	noteSearchEnabled: true,
 	backgroundTray: true,
+	launchAtLogin: false,
 	explorerSorting: { enabled: true, grouping: 'files-first', primary: 'mtime-desc', secondary: 'none', folderPrimary: 'name-asc', folderSecondary: 'none', includeUpdated: true },
 	origin: edition.serviceOrigin ?? '',
 	workspace: '',
@@ -758,6 +762,12 @@ export default class IndependentSync extends Plugin {
 		registerNoteSearch(this);
 		registerNoteEncryption(this);
 		this.refreshBackgroundTray();
+		if (!Platform.isMobile && windowsStartupSupported(window.require) && this.registerObsidianProtocolHandler) {
+			this.registerObsidianProtocolHandler(`${this.manifest.id}-startup`, params => {
+				void this.handleLoginStartup(params).catch(() => this.notify(t('startup.hideFailed')));
+			});
+			void this.refreshStartupRegistration();
+		}
 		this.registerView(logViewType, (leaf) => new SyncLogView(leaf, this));
 		this.addRibbonIcon('refresh-cw', t('msg_6dc05b92e9'), async () => {
 			const leaf =
@@ -988,7 +998,9 @@ export default class IndependentSync extends Plugin {
 	}
 	async setting(name, value, configurationReady = false) {
 		if (this.stopped) throw new Error('Plugin is unloaded');
+		if (name === 'launchAtLogin') return this.setLaunchAtLogin(value === true);
 		if (name === 'backgroundTray') {
+			if (value !== true && this.data.settings.launchAtLogin === true && windowsStartupSupported(window.require) && this.startupStatus !== false) throw Error(t('startup.trayRequired'));
 			const previous = this.data.settings.backgroundTray;
 			this.data.settings.backgroundTray = value === true;
 			try { await this.saveData(this.data); }
@@ -1849,6 +1861,7 @@ export default class IndependentSync extends Plugin {
 		report.timingScope = 'plugin-session';
 		report.timings = structuredClone(this.phaseTimings ?? {});
 		report.pendingDiagnostics = this.data.taskOutbox?.length ?? 0;
+		report.androidTransportDiagnostics = this.data.androidTransportDiagnostics ?? [];
 		if (activity) report.activity = {
 			stage: activity.stage,
 			elapsedMs: Math.max(0, (activity.finishedAt ?? Date.now()) - activity.startedAt),
@@ -1880,11 +1893,51 @@ export default class IndependentSync extends Plugin {
 			: this.data.settings.lanAcceleration === false ? t('lan.disabled')
 			: stats?.supported === false ? t('lan.unsupported')
 			: stats?.connected ? t('lan.connected', { count: stats.connected }) : t('lan.cloud');
-		return details ? t('lan.summary', { state, received: formatStorageSize(stats?.receivedBytes ?? 0), sent: formatStorageSize(stats?.sentBytes ?? 0), cloud: formatStorageSize(stats?.cloudBytes ?? 0), fallbacks: stats?.fallbacks ?? 0 }) : state;
+		return details ? t('lan.summary', { state, received: formatStorageSize(stats?.receivedBytes ?? 0), sent: formatStorageSize(stats?.sentBytes ?? 0), cloud: formatStorageSize(stats?.cloudBytes ?? 0) }) : state;
 	}
 	workspaceApi(origin, ...args) {
 		assertEditionOrigin(origin);
-		return new WorkspaceApi(origin, ...args);
+		const api = new WorkspaceApi(origin, ...args);
+		if (Platform.isAndroidApp === true && supportsAndroidNativeVersion(this.manifest?.version) && args[2] === undefined) {
+			const binding = JSON.stringify([this.data.localId, api.origin, this.data.settings.workspace]);
+			if (this.androidTransport?.binding !== binding) {
+				const pinId = `authority:${api.origin}`;
+				this.androidTransport = { binding, fetcher: androidFallback({
+					android: true, origin: api.origin, requestUrl: ObsidianSdk.requestUrl,
+					getPin: () => this.data[pinId],
+					savePin: async key => { this.data[pinId] = key; await this.saveData(this.data); },
+					runtime: { obsidian: ObsidianSdk.apiVersion, plugin: this.manifest.version, webViewChromium: window.navigator?.appVersion?.match(/(?:Chrome|Chromium)\/([\d.]+)/)?.[1] },
+					onDiagnostic: event => this.recordAndroidTransportDiagnostic(event, binding),
+				}) };
+			}
+			api.fetcher = this.androidTransport.fetcher;
+		}
+		return api;
+	}
+	recordAndroidTransportDiagnostic(event, binding) {
+		const current = () => JSON.stringify([this.data.localId, this.data.settings.origin, this.data.settings.workspace]) === binding;
+		if (!current()) return;
+		this.androidDiagnosticRun = (this.androidDiagnosticRun ?? Promise.resolve()).catch(() => {}).then(async () => {
+			if (!current()) return;
+			this.androidDiagnosticLast ??= new Map();
+			const previous = this.androidDiagnosticLast.get(event.stage);
+			if (previous !== undefined && event.at - previous < 60000) return;
+			this.androidDiagnosticLast.set(event.stage, event.at);
+			const rows = Array.isArray(this.data.androidTransportDiagnostics) ? this.data.androidTransportDiagnostics : [];
+			this.data.androidTransportDiagnostics = [...rows, event].slice(-100);
+			if (this.data.settings.workspace) {
+				const scope = await fingerprint(new TextEncoder().encode(`${this.data.settings.origin}|${this.data.settings.workspace}`));
+				const marker = `android-transport:v1:${this.manifest.version}:${event.stage}:${event.errorType}`;
+				const note = await fingerprint(new TextEncoder().encode(marker));
+				if (!current()) return;
+				this.queueDiagnostic({ id: event.stage === 'native-selected' ? event.traceId : crypto.randomUUID(), scope, note,
+					direction: 'cycle', status: event.stage.includes('failed') ? 'failed' : 'done',
+					bytes: 0, total: 0, failure: event.stage.includes('failed') ? 11 : 0,
+					started: event.at - event.durationMs, finished: event.at, version: this.manifest.version.split('-')[0] });
+			}
+			await this.saveData(this.data);
+		});
+		return this.androidDiagnosticRun;
 	}
 	api() {
 		const config = this.data.settings;
@@ -1958,6 +2011,7 @@ export default class IndependentSync extends Plugin {
 			origin: api.origin,
 			signal: api.signal,
 			lan: this.data.settings.lan,
+			fetcher: api.fetcher,
 			pinned: this.data[pinId],
 			savePin: async (key) => {
 				this.data[pinId] = key;
@@ -2454,6 +2508,68 @@ export default class IndependentSync extends Plugin {
 		});
 	}
 
+	startupController() {
+		return windowsStartup({ load: name => window.require(name), pluginId: this.manifest.id,
+			vaultPath: this.app.vault.adapter.getBasePath(), registeredPath: this.data.settings.launchAtLoginPath,
+			expectedVaultId: this.data.settings.launchAtLoginVault });
+	}
+	async refreshStartupRegistration() {
+		const settings = this.data.settings, localId = this.data.localId;
+		const revision = this.startupStatusRevision;
+		let configured = false;
+		try {
+			if (settings.launchAtLogin === true && windowsStartupSupported(window.require))
+				configured = await (await this.startupController()).isConfigured(settings.launchAtLoginToken);
+		} catch { /* Missing native support or stale copied preferences is not activation. */ }
+		if (this.stopped || settings !== this.data.settings || localId !== this.data.localId || revision !== this.startupStatusRevision) return false;
+		this.startupStatus = configured;
+		this.tab?.update();
+		return configured;
+	}
+	async handleLoginStartup(params) {
+		const settings = this.data.settings, localId = this.data.localId;
+		if (this.stopped || !startupRequestMatches(params, settings) || !windowsStartupSupported(window.require)) return;
+		const valid = () => !this.stopped && settings === this.data.settings && localId === this.data.localId && startupRequestMatches(params, settings);
+		if (!await (await this.startupController()).isConfigured(settings.launchAtLoginToken) || !valid()) return;
+		this.app.workspace.onLayoutReady(() => {
+			if (!valid()) return;
+			if (!this.backgroundTray) this.refreshBackgroundTray();
+			if (!this.backgroundTray?.hide()) this.notify(t('startup.hideFailed'));
+		});
+	}
+	async setLaunchAtLogin(enabled) {
+		if (this.startupUpdating) throw Error(t('startup.busy'));
+		this.startupUpdating = true;
+		this.startupStatusRevision = (this.startupStatusRevision ?? 0) + 1;
+		const settings = this.data.settings, localId = this.data.localId;
+		const startupKeys = ['launchAtLogin', 'launchAtLoginToken', 'launchAtLoginVault', 'launchAtLoginPath', 'backgroundTray'];
+		const previous = Object.fromEntries(startupKeys.filter(key => Object.hasOwn(settings, key)).map(key => [key, settings[key]]));
+		const previousStatus = this.startupStatus;
+		let undo;
+		try {
+			const startup = await IndependentSync.prototype.startupController.call(this);
+			if (this.stopped || settings !== this.data.settings || localId !== this.data.localId) throw Error('Startup context changed');
+			const token = enabled ? (/^[a-f0-9-]{32,64}$/.test(settings.launchAtLoginToken ?? '') ? settings.launchAtLoginToken : crypto.randomUUID()) : '';
+			undo = await startup.change(enabled, token);
+			if (this.stopped || settings !== this.data.settings || localId !== this.data.localId) throw Error('Startup context changed');
+			settings.launchAtLogin = enabled;
+			settings.launchAtLoginToken = token;
+			settings.launchAtLoginVault = enabled ? startup.vaultId : '';
+			settings.launchAtLoginPath = enabled ? startup.boundPath : '';
+			if (enabled) settings.backgroundTray = true;
+			await this.saveData(this.data);
+			this.startupStatus = enabled;
+			this.refreshBackgroundTray();
+		} catch (error) {
+			this.startupStatus = previousStatus;
+			if (settings === this.data.settings) for (const key of startupKeys) {
+				if (Object.hasOwn(previous, key)) settings[key] = previous[key];
+				else delete settings[key];
+			}
+			try { await undo?.(); } catch { this.notify(t('startup.rollbackFailed')); }
+			throw error;
+		} finally { this.startupUpdating = false; }
+	}
 	refreshBackgroundTray() {
 		this.backgroundTray?.dispose();
 		this.backgroundTray = undefined;
@@ -3660,7 +3776,7 @@ export default class IndependentSync extends Plugin {
 		const live = () => !this.stopped && localId === this.data.localId && origin === new URL(this.data.settings.origin).origin && guest === (!this.secret('account') && !this.secret('access'));
 		const service = new URL(origin);
 		const purchaseBase = origin === edition.stagingOrigin ? 'https://sync.wujiesync.cc/pay-test'
-			: edition.development && service.protocol === 'http:' && ['127.0.0.1','localhost'].includes(service.hostname) ? origin : 'https://sync.wujiesync.cc/pay';
+			: edition.development && service.protocol === 'http:' && ['127.0.0.1','localhost'].includes(service.hostname) ? origin : 'https://pay.wujiesync.cc/pay';
 		if (guest && !this.purchaseSession()) {
 			const capability = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/, '');
 			this.app.secretStorage.setSecret(`${this.manifest.id}-${localId}-purchase`, JSON.stringify({origin,capability}));
@@ -3678,9 +3794,12 @@ export default class IndependentSync extends Plugin {
 		if (!live() || key !== this.secret('account') || (guest && purchase.capability !== this.purchaseSession()?.capability)) return;
 		const url = new URL(entry.url);
 		const expected = new URL(purchaseBase + '/plans');
+		// Existing core tickets remain valid across the same order store during migration.
+		// Accept only this exact known legacy authority, never an arbitrary redirect.
+		if (expected.origin === 'https://pay.wujiesync.cc' && url.origin === 'https://sync.wujiesync.cc' && !url.username && !url.password) url.host = expected.host;
 		const checkout = expected.pathname.replace(/plans$/, 'checkout/');
 		const allowedPath = typeof orderId === 'string' && /^[a-f0-9]{32}$/.test(orderId) ? checkout + orderId : expected.pathname;
-		if (url.origin !== expected.origin || url.pathname !== allowedPath || url.search || !/^#ticket=[A-Za-z0-9_-]{43}$/.test(url.hash)) throw Error('Invalid purchase entry');
+		if (url.username || url.password || url.origin !== expected.origin || url.pathname !== allowedPath || url.search || !/^#ticket=[A-Za-z0-9_-]{43}$/.test(url.hash)) throw Error('Invalid purchase entry');
 		if (orderId === true) url.pathname = expected.pathname.replace(/plans$/, 'orders');
 		window.open(url.href, '_blank', 'noopener,noreferrer');
 	}
@@ -3790,6 +3909,7 @@ export default class IndependentSync extends Plugin {
 		let api, lastDeletion, closed = false, revision = 0;
 		const localId = this.data.localId;
 		const dialog = new ChoiceWindow(this.app,t('overview.manageNotebooks'), () => {});
+		dialog.contentEl.classList.add('smart-sync-notebooks');
 		const valid = () => !closed && !this.stopped && localId === this.data.localId && (!api || (api.origin === new URL(this.data.settings.origin).origin && api.accessKey === this.secret('account')));
 		const load = async () => {
 			const version = ++revision;
@@ -3802,12 +3922,18 @@ export default class IndependentSync extends Plugin {
 				if (!valid() || version !== revision) return;
 				dialog.contentEl.empty();
 				dialog.contentEl.createEl('p',{text:t('notebooks.help')});
-				action(dialog.contentEl,t('notebooks.refresh'),load);
-				action(dialog.contentEl,t('accountEncryption.unlock'),()=>this.withAccountEncryption(api,async()=>this.notify(t('accountEncryption.ready'))));
+				const toolbar = new Setting(dialog.contentEl);
+				toolbar.settingEl.classList.add('smart-sync-notebook-toolbar');
+				bindAction(toolbar,t('notebooks.refresh'),load);
+				bindAction(toolbar,t('accountEncryption.unlock'),()=>this.withAccountEncryption(api,async()=>this.notify(t('accountEncryption.ready'))));
 				if (!result.workspaces.length) dialog.contentEl.createEl('p',{text:t('notebooks.empty')});
+				const sizeRows = [];
 				for (const workspace of result.workspaces) {
 					const current = this.data.settings.workspace === workspace.id;
-					const row = new Setting(dialog.contentEl).setName(this.workspaceDisplayName(workspace)).setDesc(current ? t('notebooks.current') : '');
+					const description = size => [current ? t('notebooks.current') : '', t('notebooks.cloudSize', { size })].filter(Boolean).join(' · ');
+					const row = new Setting(dialog.contentEl).setName(this.workspaceDisplayName(workspace)).setDesc(description(t('overview.spaceUnknown')));
+					row.settingEl.classList.add('smart-sync-notebook-row');
+					sizeRows.push({ workspace, row, description });
 					if (current) row.addButton(button => button.setButtonText(t('notebooks.connected')).setDisabled(true));
 					else bindAction(row,t('notebooks.connect'), async () => {
 						const replacing = !!this.data.settings.workspace;
@@ -3845,7 +3971,7 @@ export default class IndependentSync extends Plugin {
 				}
 				for (const job of [...(result.deletions ?? []).filter(job=>job.workspace!==lastDeletion?.workspace),...(lastDeletion?[lastDeletion]:[])]) dialog.contentEl.createEl('p',{text:t(job.state==='complete'?'notebooks.deleted':job.state==='retrying'?'notebooks.retrying':'notebooks.cleaning')});
 				// Account authorization is reused; creating does not sign in again.
-				action(dialog.contentEl,t('msg_586de4b2a5'),async () => {
+				bindAction(toolbar,t('msg_586de4b2a5'),async () => {
 					formWindow(this.app,t('msg_372e614bfe'),[
 						{key:'label',label:t('msg_4e9bfa704d')},
 					],async ({label}) => {
@@ -3858,6 +3984,18 @@ export default class IndependentSync extends Plugin {
 					});
 				});
 
+				// Fetch summaries only, after the management controls have rendered.
+				const sizeApi = api;
+				for (const { workspace, row, description } of sizeRows) {
+					if (!valid() || version !== revision) return;
+					let size = t('notebooks.sizeUnavailable');
+					try {
+						const usage = await sizeApi.request('GET', `workspaces/${encodeURIComponent(workspace.id)}/usage?summary=1`);
+						if (Number.isSafeInteger(usage.logicalBytes) && usage.logicalBytes >= 0) size = formatStorageSize(usage.logicalBytes);
+					} catch { /* A size failure must not disable management of other notebooks. */ }
+					if (!valid() || version !== revision) return;
+					row.setDesc(description(size));
+				}
 			} catch (error) {
 				if (!valid() || version !== revision) return;
 				dialog.contentEl.empty();
@@ -4988,7 +5126,6 @@ export class IndependentSettings extends PluginSettingTab {
 				});
 			}
 			const metrics = details?.createEl('p');
-			details?.createEl('p', { text: t('lan.fallbackHelp') });
 			const update = () => {
 				if (disposed || plugin.stopped || identityScope() !== scopeKey) { window.clearInterval(timer); return; }
 				setting.setDesc(plugin.lanSummary());
@@ -5133,8 +5270,16 @@ export class IndependentSettings extends PluginSettingTab {
 					.setDesc(t('tray.help'))
 					.addToggle(input => input.setValue(config.backgroundTray !== false).onChange(async value => {
 						try { await plugin.setting('backgroundTray', value); }
-						catch { plugin.notify(t('notes.saveFailed')); this.update(); }
-					})))] : []),
+						catch { plugin.notify(config.launchAtLogin ? t('startup.trayRequired') : t('notes.saveFailed')); this.update(); }
+					}))),
+					...(windowsStartupSupported(window.require) ? [row(t('startup.enabled'), setting => setting
+						.setDesc(config.launchAtLogin === true && plugin.startupStatus === false ? t('startup.notRegistered') : t('startup.help'))
+						.addToggle(input => input.setValue(config.launchAtLogin === true && plugin.startupStatus !== false).onChange(async value => {
+							input.setDisabled(true);
+							try { await plugin.setting('launchAtLogin', value); }
+							catch (error) { plugin.notify(t(error?.code === 'STARTUP_CUSTOM_PROFILE' ? 'startup.customProfile' : 'startup.failed')); }
+							finally { input.setDisabled(false); this.update(); }
+						}))) ] : [])] : []),
 				...advancedItems,
 			]),
 		];
