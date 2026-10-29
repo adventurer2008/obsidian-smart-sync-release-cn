@@ -3752,16 +3752,36 @@ export default class IndependentSync extends Plugin {
 		dialog.open();
 		return dialog;
 	}
+	billingApi(key) {
+		const serviceOrigin = new URL(this.data.settings.origin).origin;
+		assertEditionOrigin(serviceOrigin);
+		const staging = serviceOrigin === edition.stagingOrigin;
+		const local = edition.development && !staging && new URL(serviceOrigin).protocol === 'http:';
+		if (local) return this.workspaceApi(serviceOrigin, key);
+		const payOrigin = 'https://pay.wujiesync.cc';
+		let transport = (url, options) => fetch(url, options);
+		if (!staging && Platform.isAndroidApp === true && supportsAndroidNativeVersion(this.manifest?.version)) {
+			const pinId = `authority:${payOrigin}`;
+			transport = androidFallback({android:true,origin:payOrigin,requestUrl:ObsidianSdk.requestUrl,
+				getPin:()=>this.data[pinId],savePin:async value=>{this.data[pinId]=value;await this.saveData(this.data);}});
+		}
+		return new WorkspaceApi(payOrigin, key, '', (url, options) => {
+			const target = new URL(url);
+			if (target.origin !== payOrigin || !target.pathname.startsWith('/ss2/billing/')) throw Error('Invalid payment API');
+			if (staging) target.pathname = '/pay-test' + target.pathname;
+			return transport(target.href, options);
+		});
+	}
 	async billingSummary() {
 		if (this.secret('account') || this.secret('access')) {
 			const api = await this.accountApi(), key = this.secret('account');
-			const data = await api.request('GET', 'billing/entitlement');
+			const data = await this.billingApi(api.accessKey ?? key).request('GET', 'billing/entitlement');
 			if (key !== this.secret('account')) throw pairingFault('PAIRING_CHANGED');
 			return data;
 		}
 		const purchase = this.purchaseSession();
 		if (!purchase) return undefined;
-		try { return await this.workspaceApi(purchase.origin, purchase.capability).request('GET', 'billing/guest'); }
+		try { return await this.billingApi(purchase.capability).request('GET', 'billing/guest'); }
 		catch (error) {
 			if (error.status === 401 && this.purchaseSession()?.capability === purchase.capability) {
 				return undefined;
@@ -3775,7 +3795,7 @@ export default class IndependentSync extends Plugin {
 		const guest = !this.secret('account') && !this.secret('access');
 		const live = () => !this.stopped && localId === this.data.localId && origin === new URL(this.data.settings.origin).origin && guest === (!this.secret('account') && !this.secret('access'));
 		const service = new URL(origin);
-		const purchaseBase = origin === edition.stagingOrigin ? 'https://sync.wujiesync.cc/pay-test'
+		const purchaseBase = origin === edition.stagingOrigin ? 'https://pay.wujiesync.cc/pay-test'
 			: edition.development && service.protocol === 'http:' && ['127.0.0.1','localhost'].includes(service.hostname) ? origin : 'https://pay.wujiesync.cc/pay';
 		if (guest && !this.purchaseSession()) {
 			const capability = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/, '');
@@ -3784,7 +3804,8 @@ export default class IndependentSync extends Plugin {
 			return;
 		}
 		const purchase = guest ? this.purchaseSession() : undefined;
-		const api = guest ? this.workspaceApi(origin, purchase.capability) : await this.accountApi(), key = this.secret('account');
+		const account = guest ? undefined : await this.accountApi(), key = this.secret('account');
+		const api = this.billingApi(guest ? purchase.capability : account.accessKey ?? key);
 		let entry;
 		try { entry = await api.request('POST', guest ? 'billing/guest/entry' : 'billing/entry', typeof orderId === 'string' ? {orderId} : {}); }
 		catch (error) {
@@ -3794,9 +3815,6 @@ export default class IndependentSync extends Plugin {
 		if (!live() || key !== this.secret('account') || (guest && purchase.capability !== this.purchaseSession()?.capability)) return;
 		const url = new URL(entry.url);
 		const expected = new URL(purchaseBase + '/plans');
-		// Existing core tickets remain valid across the same order store during migration.
-		// Accept only this exact known legacy authority, never an arbitrary redirect.
-		if (expected.origin === 'https://pay.wujiesync.cc' && url.origin === 'https://sync.wujiesync.cc' && !url.username && !url.password) url.host = expected.host;
 		const checkout = expected.pathname.replace(/plans$/, 'checkout/');
 		const allowedPath = typeof orderId === 'string' && /^[a-f0-9]{32}$/.test(orderId) ? checkout + orderId : expected.pathname;
 		if (url.username || url.password || url.origin !== expected.origin || url.pathname !== allowedPath || url.search || !/^#ticket=[A-Za-z0-9_-]{43}$/.test(url.hash)) throw Error('Invalid purchase entry');

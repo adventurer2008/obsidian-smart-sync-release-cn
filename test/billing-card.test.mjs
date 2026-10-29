@@ -5,6 +5,11 @@ import { billingCard, mountBillingCard, renewalReminderAt } from '../src/billing
 
 const at = Date.UTC(2026, 9, 22), gb = 1024 ** 3;
 const paid = ends => ({ everPurchased:true, entitlement:{paid:true,plan:'cn-5gb-year',logical:5*gb,ends}, usage:{logicalBytes:1.2*gb} });
+
+test('an operator-closed unpaid order is terminal and has no resume action',()=>{
+ const card=billingCard({entitlement:{paid:false},currentOrder:{id:'synthetic-closed',status:'expired',purpose:'purchase',title:'5GB'}},true,at);
+ assert.equal(card.order,'订单已关闭');assert.equal(card.resume,undefined);assert.doesNotMatch(card.order,/处理中|等待付款/);
+});
 test('signing in remounts one free card and discards the old guest view and pending response', async () => {
  const dom = new JSDOM('<div id="setting"><div id="info"><span>我的套餐</span></div><div id="controls"></div></div>', {pretendToBeVisual:true}), doc = dom.window.document;
  const setting = {settingEl:doc.querySelector('#setting'), infoEl:doc.querySelector('#info'), controlEl:doc.querySelector('#controls'), setName(){}};
