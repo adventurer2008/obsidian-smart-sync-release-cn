@@ -4,6 +4,22 @@ import { test } from 'node:test';
 import { LanPeers, intersectDirection } from '../src/peers.js';
 import { fingerprint } from '../src/codec.js';
 
+test('starting a cycle waits for an in-flight presence poll then refreshes changed remote restrictions', async t => {
+	let release, entered, calls = 0;
+	const ready = new Promise(resolve => { entered = resolve; });
+	const hold = new Promise(resolve => { release = resolve; });
+	const peers = new LanPeers({ workspace: 'synthetic', request: async () => {
+		calls++;
+		if (calls === 1) { entered(); await hold; return { id: 'device', mode: 'both', peers: [] }; }
+		return { id: 'device', mode: 'paused', peers: [] };
+	} }, { enabled: false });
+	t.after(() => { release(); peers.close(); });
+	const previous = peers.tick(); await ready;
+	const start = peers.start(); release();
+	await previous; await start;
+	assert.equal(peers.mode, 'paused'); assert.equal(calls, 2);
+});
+
 test('stuck WebRTC negotiation expires and closes the link for cloud fallback', async () => {
 	let closed = 0;
 	const peers = new LanPeers({});
@@ -69,6 +85,8 @@ test('peer object frames verify the complete digest, reject corruption and relea
 	a.remember(address, body);
 	assert.deepEqual(await b.load(address), body);
 	assert.equal(b.pending.size, 0);
+	// Force a fresh request rather than the newly reusable verified local cache.
+	b.cache.clear(); b.cacheBytes = 0;
 	a.cache.set(address, new Uint8Array(body.length));
 	assert.equal(await b.load(address), null);
 	a.cache.clear();

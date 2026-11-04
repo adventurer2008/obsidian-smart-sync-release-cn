@@ -2,7 +2,7 @@ import { formatStorageSize } from './i18n.js';
 
 const pending = new Set(['creating', 'pending', 'uncertain']);
 const mountedCards = new WeakMap();
-const statuses = { creating: '正在生成订单', pending: '等待付款', uncertain: '正在核实付款结果，请勿重复付款', paid: '付款成功', rejected: '支付订单创建失败', refund_pending: '退款处理中', refunded: '已退款' };
+const statuses = { creating: '正在生成订单', pending: '等待付款', expired: '订单已关闭', uncertain: '正在核实付款结果，请勿重复付款', paid: '付款成功', rejected: '支付订单创建失败', refund_pending: '退款处理中', refunded: '已退款' };
 export function capacityWarning(data) {
 	const used = data?.usage?.logicalBytes, capacity = data?.entitlement?.logical;
 	if (!Number.isSafeInteger(used) || !Number.isSafeInteger(capacity) || capacity < 0 || used <= capacity) return undefined;
@@ -18,7 +18,8 @@ export function renewalReminderAt(ends) {
 }
 export function billingCard(data, connected, now = Date.now()) {
 	const rights = data?.entitlement, order = data?.currentOrder;
-	const showOrder = order && (order.status !== 'paid' || order.purpose === 'test' || order.failureCode === 'paid_plan_conflict');
+	const hidePendingOrder = rights?.paid === true && rights.ends > now && pending.has(order?.status) && order.failureCode !== 'paid_plan_conflict';
+	const showOrder = order && !hidePendingOrder && (order.status !== 'paid' || order.purpose === 'test' || order.failureCode === 'paid_plan_conflict');
 	const free = rights?.plan === 'cn-free' && rights?.paid !== true;
 	const purchased = !free && (rights?.paid === true || data?.everPurchased === true);
 	const ends = rights?.ends ?? data?.lastPurchase?.ends;

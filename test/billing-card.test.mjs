@@ -5,6 +5,11 @@ import { billingCard, mountBillingCard, renewalReminderAt } from '../src/billing
 
 const at = Date.UTC(2026, 9, 22), gb = 1024 ** 3;
 const paid = ends => ({ everPurchased:true, entitlement:{paid:true,plan:'cn-5gb-year',logical:5*gb,ends}, usage:{logicalBytes:1.2*gb} });
+
+test('an operator-closed unpaid order is terminal and has no resume action',()=>{
+ const card=billingCard({entitlement:{paid:false},currentOrder:{id:'synthetic-closed',status:'expired',purpose:'purchase',title:'5GB'}},true,at);
+ assert.equal(card.order,'订单已关闭');assert.equal(card.resume,undefined);assert.doesNotMatch(card.order,/处理中|等待付款/);
+});
 test('signing in remounts one free card and discards the old guest view and pending response', async () => {
  const dom = new JSDOM('<div id="setting"><div id="info"><span>我的套餐</span></div><div id="controls"></div></div>', {pretendToBeVisual:true}), doc = dom.window.document;
  const setting = {settingEl:doc.querySelector('#setting'), infoEl:doc.querySelector('#info'), controlEl:doc.querySelector('#controls'), setName(){}};
@@ -119,4 +124,14 @@ test('free card shows 100MB, opening date only and a prominent purchase-more act
  const setting={settingEl:doc.querySelector('#setting'),infoEl:doc.querySelector('#info'),controlEl:doc.querySelector('#controls'),setName(){}};let opened=0;
  const dispose=mountBillingCard(setting,{connected:true,live:()=>true,now:()=>at,target:dom.window,load:async()=>value,open:async()=>{opened++;},onError:e=>{throw e;}});
  try{await new Promise(done=>setImmediate(done));assert.equal(setting.settingEl.classList.contains('is-free'),true);assert.equal(doc.querySelector('button').textContent,'购买更多额度');doc.querySelector('button').click();await new Promise(done=>setImmediate(done));assert.equal(opened,1);}finally{dispose();dom.window.close();}
+});
+
+test('an active subscription hides unrelated unfinished orders but preserves payment polling', () => {
+ const card = billingCard({...paid(Date.UTC(2027,0,1)),currentOrder:{id:'another',title:'5GB',status:'pending',purpose:'purchase'}},true,at);
+ assert.equal(card.badge,'已开通'); assert.equal(card.title,'当期套餐：5GB 年付');
+ assert.equal(card.order,'');
+ for (const status of ['creating','pending','uncertain']) assert.equal(billingCard({...paid(Date.UTC(2027,0,1)),currentOrder:{status,purpose:'purchase'}},true,at).order,'');
+ assert.match(billingCard({...paid(Date.UTC(2027,0,1)),currentOrder:{status:'paid',failureCode:'paid_plan_conflict'}},true,at).order,/待核对/);
+ assert.match(billingCard({...paid(at-1),currentOrder:{status:'pending'}},true,at).order,/等待付款/);
+ assert.equal(card.resume,'another');
 });

@@ -50,6 +50,7 @@ export class TaskJournal {
 				bytes: count(row.bytes),
 				total: count(row.total),
 				failure: count(row.failure),
+				...(row.skipReason === 'desktop-plugin' ? { skipReason: row.skipReason } : {}),
 				...taskTimings(row),
 			}));
 	}
@@ -90,7 +91,8 @@ export class TaskJournal {
 			row.finished = Date.now();
 			Object.assign(row, taskTimings(event));
 			row.failure = event.status === 'failed' ? failureCode(event.error) : 0;
-			if (event.status === 'done')
+			if (event.status === 'skipped' && event.skipReason === 'desktop-plugin') row.skipReason = event.skipReason;
+			if (event.status === 'done' || (event.status === 'skipped' && event.skipReason === 'desktop-plugin'))
 				for (const old of this.rows)
 					if (
 						old !== row &&
@@ -121,7 +123,7 @@ export class TaskJournal {
 		return row?.scope === scope && retryable(row);
 	}
 	message(row) {
-		return row.status === 'interrupted' ? t('msg_023c523155') : failureText(row.failure);
+		return row.skipReason === 'desktop-plugin' ? t('configuration.desktopSkipped') : row.status === 'interrupted' ? t('msg_023c523155') : failureText(row.failure);
 	}
 }
 const failures = [

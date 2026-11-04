@@ -70,14 +70,19 @@ export function pendingAttachment(notes, href, source = '') {
 			} else if (item && item !== '.') parts.push(item);
 		}
 		const path = safeNotePath(parts.join('/'));
-		const matches = Object.entries(notes).filter(
+		const attachments = Object.entries(notes).filter(
 			([, note]) =>
 				!note.removed &&
-				!note.downloaded &&
-				!note.path.toLowerCase().endsWith('.md') &&
-				(note.path === path || note.path === raw),
+				!note.path.toLowerCase().endsWith('.md'),
 		);
-		return matches.length === 1 ? matches[0] : undefined;
+		// Deferred files are absent from Obsidian's local link index. Resolve
+		// shortest wiki links against the remote inventory, retaining ambiguity
+		// even when one of the same-named attachments is already downloaded.
+		let matches = attachments.filter(([, note]) => note.path === path);
+		if (!matches.length) matches = attachments.filter(([, note]) => note.path === raw);
+		if (!matches.length && !raw.startsWith('/') && !raw.split('/').some(part => part === '..' || part === '.'))
+			matches = attachments.filter(([, note]) => note.path.endsWith(`/${raw}`));
+		return matches.length === 1 && !matches[0][1].downloaded ? matches[0] : undefined;
 	} catch {
 		return undefined;
 	}
@@ -97,11 +102,40 @@ function renameConflict(message) {
 	error.code = 'RENAME_CONFLICT';
 	return error;
 }
+// Device-local event hints are an optimization, never a deletion inventory.
+// A new process, structural change, policy change or expired audit always scans fully.
+export class IncrementalInventory {
+	constructor({ auditMs = 60000, limit = 4096, now = () => Date.now() } = {}) {
+		this.auditMs = auditMs; this.limit = limit; this.now = now;
+		this.revision = 0; this.structural = 0; this.dirty = new Map();
+	}
+	changed(event, path) {
+		const revision = ++this.revision;
+		if (event !== 'modify' || typeof path !== 'string' || this.dirty.size >= this.limit) {
+			this.structural = revision; this.dirty.clear();
+		} else this.dirty.set(path, revision);
+	}
+	invalidate() { this.structural = ++this.revision; this.baseline = undefined; }
+	begin(state, policy, force = false) {
+		const baseline = this.baseline, now = this.now();
+		return { revision: this.revision, state, policy, at: now,
+			full: force || !baseline || baseline.state !== state || baseline.policy !== policy ||
+				this.structural > baseline.revision || now < baseline.at || now - baseline.at >= this.auditMs,
+			paths: [...this.dirty.keys()] };
+	}
+	finish(plan) {
+		for (const [path, revision] of this.dirty) if (revision <= plan.revision) this.dirty.delete(path);
+		this.baseline = { state: plan.state, policy: plan.policy, revision: plan.revision,
+			at: plan.full ? plan.at : this.baseline.at };
+	}
+}
+
 export class NotebookSynchronizer {
 	#running;
 	#active;
 	#batching = false;
 	#pendingSaves = 0;
+	#pendingBytes = 0;
 	#completed = [];
 	#savedAt = 0;
 	#cachedObjects = new Map();
@@ -110,6 +144,34 @@ export class NotebookSynchronizer {
 	#queuedUploads = [];
 	#contentPoll;
 	#bulkRemoved = new Set();
+	#remoteHeads = new Map();
+	#remoteFiles = new Map();
+	async #remoteFile(path) {
+		if (this.#remoteFiles.has(path)) return this.#remoteFiles.get(path);
+		this.assertActive();
+		const known = Object.entries(this.state.notes).filter(([, note]) => note.path === path).sort((a, b) => b[1].revision - a[1].revision)[0];
+		const id = known?.[0] ?? await opaqueNoteId(this.keys, path);
+		const previous = known?.[1];
+		let entry = this.#remoteHeads.get(id) ?? (previous?.manifest ? { note: id, manifest: previous.manifest, removed: previous.removed } : undefined);
+		const load = address => this.#load(address);
+		let info = entry && !entry.removed ? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, load) : undefined;
+		if (info?.path !== path) {
+			// Reinstalled or renamed files can have a non-derived identity. Match authenticated paths.
+			entry = undefined;
+			for (const current of this.#remoteHeads.values()) {
+				if (current.removed) continue;
+				const inspected = await inspectNote(this.keys, this.api.workspace, current.note, current.manifest, load);
+				if (inspected.path === path) { entry = current; info = inspected; break; }
+			}
+		}
+		if (!entry || !info || info.path !== path) { this.#remoteFiles.set(path, undefined); return undefined; }
+		const maximum = path.endsWith('/community-plugins.json') ? 1024 * 1024 : 65536;
+		if (info.path !== path || info.kind !== 'file' || info.bytes > maximum) throw Error('Invalid plugin compatibility metadata');
+		const result = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info);
+		this.#remoteFiles.set(path, result.contents);
+		while (this.#remoteFiles.size > 128) this.#remoteFiles.delete(this.#remoteFiles.keys().next().value);
+		return result.contents;
+	}
 	constructor({
 		api,
 		keys,
@@ -126,6 +188,7 @@ export class NotebookSynchronizer {
 		remoteMode = 'both',
 		checkpointSize = 1,
 		checkpointInterval = 500,
+		checkpointBytes = 4 * 1024 * 1024,
 		onTiming,
 		snapshotBeforeSave = true,
 		uploadConcurrency = 1,
@@ -139,6 +202,9 @@ export class NotebookSynchronizer {
 		contentPriorities = new Map(),
 		scanCache,
 		scanVersion,
+		incrementalInventory,
+		scanPolicy,
+		commitJournal,
 		saveRequired = false,
 	}) {
 		if (
@@ -156,13 +222,18 @@ export class NotebookSynchronizer {
 		if (!Number.isInteger(batchBytes) || batchBytes < 256 * 1024 || batchBytes > BATCH_BYTES || !Number.isInteger(batchWaitMs) || batchWaitMs < 0 || batchWaitMs > 1000)
 			throw new Error('Invalid transfer batch bounds');
 		if (!Number.isInteger(batchFiles) || batchFiles < 1 || batchFiles > 128) throw new Error('Invalid transfer batch file count');
+		if (!Number.isSafeInteger(checkpointBytes) || checkpointBytes < 256 * 1024 || checkpointBytes > 256 * 1024 * 1024) throw Error('Invalid checkpoint byte bound');
 		Object.assign(this, {
 			contentPriorities,
 			scanCache,
 			scanVersion,
+			incrementalInventory,
+			scanPolicy,
+			commitJournal,
 			remoteMode,
 			checkpointSize,
 			checkpointInterval,
+			checkpointBytes,
 			onTiming,
 			snapshotBeforeSave,
 			uploadConcurrency,
@@ -192,7 +263,97 @@ export class NotebookSynchronizer {
 			Array.isArray(this.state.localIndex)
 		)
 			{ this.state.localIndex = {}; unsavedStates.add(this.state); }
+		if (state.pendingReceives !== undefined && (!state.pendingReceives || Array.isArray(state.pendingReceives) ||
+			typeof state.pendingReceives !== 'object' || Object.entries(state.pendingReceives).some(([note, entry]) =>
+				note !== entry?.note || !validEntry(entry, 0) || (entry.path !== undefined && safeNotePath(entry.path) !== entry.path))))
+			throw Error('Invalid pending receive state');
+		const durableCommit = this.commitJournal?.current();
+		if (durableCommit !== undefined) this.state.pendingCommit = durableCommit;
+		this.#validateCommitJournal();
 		if (saveRequired) unsavedStates.add(this.state);
+	}
+	#validateCommitJournal() {
+		const journal = this.state.pendingCommit;
+		if (journal === undefined) return;
+		if (!journal || journal.format !== 1 || journal.workspace !== this.api.workspace || journal.origin !== (this.api.origin ?? '') ||
+			!['prepared', 'acknowledged'].includes(journal.phase) || !Array.isArray(journal.entries) || !journal.entries.length || journal.entries.length > 128 ||
+			new Set(journal.entries.map(item => item?.note)).size !== journal.entries.length || journal.entries.some(item =>
+				!item || !/^[a-f0-9]{64}$/.test(item.note) || !/^[a-f0-9]{64}$/.test(item.manifest) ||
+				!Number.isSafeInteger(item.expected) || item.expected < 0 || typeof item.removed !== 'boolean' ||
+				!item.next || safeNotePath(item.next.path) !== item.next.path || !['file','folder'].includes(item.next.kind) ||
+				!/^[a-f0-9]{64}$/.test(item.next.digest) ||
+				((journal.phase === 'acknowledged' || item.receipt !== undefined) && !this.#matchesCommit(item.receipt, item)))) throw Error('Invalid pending commit journal');
+	}
+	#matchesCommit(receipt, item) {
+		return validEntry(receipt, item.expected) && receipt.note === item.note && receipt.manifest === item.manifest && receipt.removed === item.removed;
+	}
+	async #submitCommit(inputs, next, batch = false) {
+		this.assertActive();
+		if (this.state.pendingCommit && (!this.commitJournal || this.state.pendingCommit.phase !== 'acknowledged')) throw Error('Pending commit must be reconciled before submitting');
+		if ((this.state.pendingCommit?.entries.length ?? 0) + inputs.length > 128) await this.#flush();
+		const prior = this.state.pendingCommit?.entries ?? [];
+		const journal = { format: 1, workspace: this.api.workspace, origin: this.api.origin ?? '', phase: 'prepared',
+			entries: [...prior, ...inputs.map((input, index) => ({ note: input.note, expected: input.expected ?? 0,
+				manifest: input.manifest ?? next[index].manifest, removed: input.removed,
+				next: { path: next[index].path, kind: next[index].kind ?? 'file', digest: next[index].digest } }))] };
+		this.state.pendingCommit = journal;
+		this.#validateCommitJournal();
+		unsavedStates.add(this.state);
+		if (this.commitJournal) await this.commitJournal.write(journal);
+		else await this.#flush(); // Intent is durable before any request may publish a revision.
+		this.assertActive();
+		const receipts = batch ? (await this.api.commitBatch(inputs))?.entries : [await this.api.commit(inputs[0].note, inputs[0])];
+		if (!Array.isArray(receipts) || receipts.length !== inputs.length || receipts.some((entry, index) => !this.#matchesCommit(entry, journal.entries[prior.length + index])))
+			throw Error('Invalid commit acknowledgement');
+		for (let index = 0; index < receipts.length; index++) journal.entries[prior.length + index].receipt = receipts[index];
+		journal.phase = 'acknowledged';
+		unsavedStates.add(this.state);
+		// Piggyback receipts on the next journal write or normal checkpoint.
+		// Until then the durable intent is sufficient to reconcile a lost response.
+		if (!this.commitJournal) await this.#flush();
+		return receipts;
+	}
+	async #finishCommit(force = false, alreadyPersisted = false) {
+		if (this.commitJournal && !force) { if (!alreadyPersisted) await this.#persist(); return; }
+		const journal = this.state.pendingCommit;
+		delete this.state.pendingCommit;
+		unsavedStates.add(this.state);
+		try { await this.#flush(); await this.commitJournal?.clear(); }
+		catch (error) { this.state.pendingCommit = journal; unsavedStates.add(this.state); throw error; }
+	}
+	async #recoverCommit() {
+		const journal = this.state.pendingCommit;
+		if (!journal) return;
+		this.#validateCommitJournal();
+		this.incrementalInventory?.invalidate();
+		for (const item of journal.entries) {
+			this.assertActive();
+			let receipt = item.receipt;
+			if (journal.phase === 'prepared' && !receipt) {
+				if (typeof this.api.versions !== 'function') throw Error('Commit recovery requires revision history');
+				let before, resolved = false;
+				for (let page = 0; page < 128; page++) {
+					const history = await this.api.versions(item.note, before);
+					if (!Array.isArray(history?.entries) || typeof history.more !== 'boolean' || (history.more && !history.entries.length)) throw Error('Invalid commit recovery history');
+					let previous = before ?? Number.MAX_SAFE_INTEGER;
+					for (const entry of history.entries) {
+						if (!validEntry(entry, 0) || entry.note !== item.note || entry.sequence >= previous) throw Error('Invalid commit recovery sequence');
+						previous = entry.sequence;
+					}
+					receipt = history.entries.find(entry => this.#matchesCommit(entry, item));
+					if (receipt || !history.more || previous <= item.expected) { resolved = true; break; }
+					before = previous;
+				}
+				if (!resolved) throw Error('Commit recovery history exceeds the bounded window');
+			}
+			if (!receipt) continue; // Never blindly resend an uncertain upload or deletion.
+			if ((this.state.notes[item.note]?.revision ?? 0) >= receipt.sequence) continue;
+			const info = await inspectNote(this.keys, this.api.workspace, item.note, item.manifest, address => this.api.load(address));
+			if (info.path !== item.next.path || info.digest !== item.next.digest || info.kind !== item.next.kind) throw Error('Commit recovery metadata mismatch');
+			this.state.notes[item.note] = { ...item.next, revision: receipt.sequence, manifest: item.manifest,
+				removed: item.removed, downloaded: !item.removed };
+		}
+		await this.#finishCommit(true);
 	}
 	async timed(stage, work) {
 		const started = performance.now();
@@ -238,22 +399,39 @@ export class NotebookSynchronizer {
 		} else { if (Object.hasOwn(this.state.localIndex, path)) unsavedStates.add(this.state); delete this.state.localIndex[path]; }
 		return { digest, size: contents.length, contents, mtime };
 	}
-	excluded(path) {
+	excluded(path, receiving = false) {
 		return (
 			path === 'Smart Sync conflicts' ||
 			path.startsWith('Smart Sync conflicts/') ||
 			!this.accepts(path) ||
+			(!receiving && this.host.excluded?.(path)) ||
 			this.ignored.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
 		);
 	}
+	#receivePaths = new Map();
+	#receiveFailures = new Map();
+	#receiveAttempts = new Set();
+	#checkpointFailed = false;
 	run(target, ceiling) {
 		if (this.#running) return this.#running;
+		this.#receivePaths.clear();
+		this.#receiveFailures.clear();
+		this.#receiveAttempts.clear();
+		this.#checkpointFailed = false;
 		this.#batching = true;
 		this.#running = this.#cycle(target, ceiling)
-			.then(() => this.#flush())
+			.then(async () => {
+				await this.#flush();
+				if (this.#receiveFailures.size) {
+					const error = this.#receiveFailures.values().next().value;
+					error.pendingReceiveCount = Object.keys(this.state.pendingReceives ?? {}).length;
+					throw error;
+				}
+			})
 			.catch(async (error) => {
 				unsavedStates.add(this.state);
 				if (this.scanCache) this.scanCache.state = undefined;
+				this.incrementalInventory?.invalidate();
 				for (const job of this.#queuedUploads.splice(0))
 					await this.onTask({ ...job.task, status: 'failed', error }).catch(() => {});
 				for (const task of this.#completed.splice(0))
@@ -261,6 +439,8 @@ export class NotebookSynchronizer {
 				throw error;
 			})
 			.finally(() => {
+				this.#remoteFiles.clear();
+				this.#remoteHeads.clear();
 				this.#cachedObjects.clear();
 				this.#windowManifests.clear();
 				this.#prefetchedInfo.clear();
@@ -292,8 +472,8 @@ export class NotebookSynchronizer {
 	}
 	async #load(address) {
 		this.assertActive();
-		const task = this.#active,
-			before = task?.bytes ?? 0;
+		const task = this.#active;
+		let reported = 0;
 		if (this.#cachedObjects.has(address)) {
 			const bytes = this.#cachedObjects.get(address);
 			this.#cachedObjects.delete(address);
@@ -307,12 +487,13 @@ export class NotebookSynchronizer {
 		if (this.#windowManifests.has(address)) return this.#windowManifests.get(address);
 		const bytes = await this.timed('download', () => this.api.load(address, ({ loaded, total }) => {
 			if (!task) return;
-			task.bytes = before + loaded;
-			task.total = Math.max(task.total, before + total, task.bytes);
+			task.bytes += Math.max(0, loaded - reported);
+			reported = Math.max(reported, loaded);
+			task.total = Math.max(task.total, task.bytes + Math.max(0, total - loaded));
 			void this.onTask({ ...task, status: 'progress' }).catch(() => {});
 		}));
 		if (task) {
-			task.bytes = before + bytes.length;
+			task.bytes += Math.max(0, bytes.length - reported);
 			task.total = Math.max(task.total, task.bytes);
 			await this.onTask({ ...task, status: 'progress' });
 		}
@@ -323,24 +504,30 @@ export class NotebookSynchronizer {
 		return (previous?.revision ?? 0) >= entry.sequence &&
 			(previous.revision !== entry.sequence || previous.downloaded || previous.removed || entry.removed || this.excluded(previous.path));
 	}
-	async #prefetch(entries) {
-		this.#cachedObjects.clear();
-		this.#prefetchedInfo.clear();
-		if (!this.batchTransfer || typeof this.api.loadBatch !== 'function') return entries.length;
+	async #prefetch(entries, retained = new Map()) {
+		// Prepare a private window. Read-ahead must never replace the active
+		// receiver's caches or mutate its task, cursor or checkpoint state.
+		const window = { cached: new Map(), manifests: new Map(), info: new Map(), covered: entries.length };
+		// Priority inspection may already have fetched a rename manifest. Keep
+		// its bounded authenticated bytes even when batch transfer is disabled.
+		const wantedRetained = new Set(entries.filter(entry => !entry.removed).map(entry => entry.manifest));
+		let retainedBudget = 128 * 1024;
+		for (const [address, body] of retained) if (wantedRetained.has(address) && body.length <= retainedBudget) {
+			window.manifests.set(address, body); retainedBudget -= body.length;
+		}
+		if (!this.batchTransfer || typeof this.api.loadBatch !== 'function') return window;
 		const live = entries.filter(entry => !entry.removed && !this.#alreadyApplied(entry));
-		if (!live.length) { this.#windowManifests.clear(); return entries.length; }
+		if (!live.length) return window;
 		try {
 			const wanted = new Set(live.map(entry => entry.manifest));
-			for (const address of this.#windowManifests.keys()) if (!wanted.has(address)) this.#windowManifests.delete(address);
-			const manifests = new Map(this.#windowManifests);
+			const manifests = new Map([...retained].filter(([address]) => wanted.has(address)));
 			const missing = [...wanted].filter(address => !manifests.has(address));
 			const remaining = this.batchBytes - 128 * 1024 - [...manifests.values()].reduce((sum, body) => sum + body.length, 0);
-			if (missing.length && remaining < 1024) { this.#windowManifests.clear(); return 1; }
+			if (missing.length && remaining < 1024) { window.covered = 1; return window; }
 			if (missing.length) for (const [address, body] of await this.timed('download', () => this.api.loadBatch(missing, remaining))) manifests.set(address, body);
-			this.#windowManifests.clear();
 			let metadataBudget = 128 * 1024;
-			for (const [address, body] of manifests) if (body.length <= metadataBudget) { this.#windowManifests.set(address, body); metadataBudget -= body.length; }
-			this.#cachedObjects = manifests;
+			for (const [address, body] of manifests) if (body.length <= metadataBudget) { window.manifests.set(address, body); metadataBudget -= body.length; }
+			window.cached = manifests;
 			let available = this.batchBytes - 128 * 1024 - [...manifests.values()].reduce((sum, body) => sum + body.length, 0);
 			const pieces = new Set();
 			let covered = 0;
@@ -350,12 +537,13 @@ export class NotebookSynchronizer {
 				let info;
 				try { info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async address => manifests.get(address)); }
 				catch { covered++; continue; } // The ordinary per-file task performs and reports the integrity failure.
-				this.#prefetchedInfo.set(entry.note + entry.manifest, info);
+				window.info.set(entry.note + entry.manifest, info);
 				const previous = this.state.notes[entry.note];
 				// Reuse the local body for path-only revisions. The receive path still
 				// checks local content and fetches on demand if it is absent or changed.
 				if (previous?.downloaded && !previous.removed && previous.digest === info.digest) { covered++; continue; }
 				if (this.excluded(info.path) || info.bytes > Math.min(4 * 1024 * 1024, this.batchBytes - 128 * 1024) || (!info.path.toLowerCase().endsWith('.md') && info.bytes > this.attachmentLimit)) { covered++; continue; }
+				if (this.api.hasLanNotes?.()) { covered++; continue; }
 				// A reconnect may retain the latest local bytes without its prior
 				// checkpoint. Let receive verify them before fetching any body;
 				// different or disappearing files still fetch through the normal path.
@@ -367,31 +555,42 @@ export class NotebookSynchronizer {
 				}
 				covered++;
 			}
-			if (pieces.size) for (const [address, bytes] of await this.timed('download', () => this.api.loadBatch([...pieces], this.batchBytes))) this.#cachedObjects.set(address, bytes);
-			return Math.max(1, covered);
+			if (pieces.size) for (const [address, bytes] of await this.timed('download', () => this.api.loadBatch([...pieces], this.batchBytes))) window.cached.set(address, bytes);
+			window.covered = Math.max(1, covered);
+			return window;
 		} catch (error) {
-			this.#cachedObjects.clear();
-			this.#windowManifests.clear();
-			this.#prefetchedInfo.clear();
 			if (error?.status === 401 || error?.status === 403 || error?.name === 'AbortError') throw error;
-			return 1;
+			return { cached: new Map(), manifests: new Map(), info: new Map(), covered: 1 };
 		}
 	}
-	async #persist() {
+	async #persist(count = 1) {
 		unsavedStates.add(this.state);
-		this.#pendingSaves++;
+		this.#pendingSaves += count;
 		if (
 			!this.#batching ||
 			this.#pendingSaves >= this.checkpointSize ||
+			this.#pendingBytes >= this.checkpointBytes ||
 			Date.now() - this.#savedAt > this.checkpointInterval
 		)
 			await this.#flush();
 	}
 	async #flush() {
 		if (!unsavedStates.has(this.state) && !this.#completed.length) return;
-		await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state);
+		const journal = this.state.pendingCommit;
+		const retire = this.commitJournal && journal?.phase === 'acknowledged' &&
+			journal.entries.every(item => (this.state.notes[item.note]?.revision ?? 0) >= item.receipt.sequence);
+		if (retire) delete this.state.pendingCommit;
+		try {
+			await this.save(this.snapshotBeforeSave ? structuredClone(this.state) : this.state,
+				retire && this.commitJournal.atomicCheckpoint === true ? { retireCommit: journal } : undefined);
+			if (retire) await this.commitJournal.clear({ checkpointed: this.commitJournal.atomicCheckpoint === true });
+		} catch (error) {
+			if (retire) this.state.pendingCommit = journal;
+			this.#checkpointFailed = true; throw error;
+		}
 		unsavedStates.delete(this.state);
 		this.#pendingSaves = 0;
+		this.#pendingBytes = 0;
 		this.#savedAt = Date.now();
 		for (const task of this.#completed.splice(0)) await this.onTask({ ...task, checkpointMilliseconds: Math.max(0, performance.now() - task.completedAt) });
 	}
@@ -410,7 +609,35 @@ export class NotebookSynchronizer {
 		if (!this.state.conflicts.some((entry) => entry.copy === copy))
 			this.state.conflicts.push({ path, copy, sequence });
 	}
+	async #recordReceiveFailure(entry, error) {
+		if (this.#checkpointFailed || this.api.signal?.aborted || error?.name === 'AbortError' ||
+			[401, 403, 409, 410, 429].includes(error?.status) ||
+			(error?.code && !['TEMP_SPACE', 'RENAME_CONFLICT', 'ENOENT', 'EIO', 'ENOSPC', 'EACCES'].includes(error.code))) throw error;
+		const pending = this.state.pendingReceives ??= {};
+		pending[entry.note] = { note: entry.note, sequence: entry.sequence, manifest: entry.manifest, removed: entry.removed,
+			...(this.#receivePaths.get(entry.note) ? { path: this.#receivePaths.get(entry.note) } : {}) };
+		this.#receiveFailures.set(entry.note, error);
+		unsavedStates.add(this.state);
+		// Commit the retry obligation before a later cursor can pass it.
+		await this.#flush();
+	}
 	async #receive(entry, force = false) {
+		const key = entry.note + ':' + entry.sequence;
+		if (this.#batching && this.#receiveAttempts.has(key)) return;
+		if (this.#batching) this.#receiveAttempts.add(key);
+		try {
+			await this.#receiveAttempt(entry, force);
+			if ((this.state.pendingReceives?.[entry.note]?.sequence ?? Infinity) <= entry.sequence) {
+				delete this.state.pendingReceives[entry.note];
+				this.#receiveFailures.delete(entry.note);
+				unsavedStates.add(this.state);
+			}
+		} catch (error) {
+			if (!this.#batching) throw error;
+			await this.#recordReceiveFailure(entry, error);
+		}
+	}
+	async #receiveAttempt(entry, force = false) {
 		const previous = this.state.notes[entry.note];
 		if ((previous?.revision ?? 0) >= entry.sequence && !force) {
 			if (
@@ -434,6 +661,7 @@ export class NotebookSynchronizer {
 			await this.#receiveCore(entry, force);
 			// The feed loop persists the file and its new cursor together.
 			if (!this.#batching || this.checkpointSize === 1) await this.#persist();
+			if (this.#active.skipReason) return 'skipped';
 			if (!this.#active.path || this.excluded(this.#active.path)) return 'skipped';
 			if (!entry.removed && !this.state.notes[entry.note]?.downloaded) return 'deferred';
 		});
@@ -450,14 +678,23 @@ export class NotebookSynchronizer {
 		const infoKey = entry.note + entry.manifest;
 		const info = this.#prefetchedInfo.get(infoKey) ?? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, load);
 		this.#prefetchedInfo.delete(infoKey);
-		if (this.excluded(info.path)) return;
+		if (this.excluded(info.path, true)) return;
+		this.#active.path = info.path;
+		this.#receivePaths.set(entry.note, info.path);
+		let decoded;
+		if (!entry.removed && this.host.validationContent?.(info.path)) decoded = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info);
+		// Tombstones install no code; a deleted manifest cannot establish compatibility.
+		const skipReason = !entry.removed && await this.host.validateReceive?.(info.path, decoded?.contents);
+		if (skipReason === 'desktop-plugin') {
+			this.#active.skipReason = skipReason;
+			this.state.notes[entry.note] = { path: info.path, kind: info.kind, revision: entry.sequence, digest: info.digest, manifest: entry.manifest, removed: entry.removed, downloaded: false, platformSkipped: skipReason };
+			return;
+		}
 		const previous = this.state.notes[entry.note];
 		const cloudPath = info.path;
 		// A parent move can update the physical path before this child's manifest.
 		// Delete its tracked location directly; a tombstone must never move it back.
 		if (entry.removed && previous && !previous.removed && previous.downloaded && !this.excluded(previous.path)) info.path = previous.path;
-		delete this.state.localIndex[info.path];
-		if (previous) delete this.state.localIndex[previous.path];
 		this.#active.path = cloudPath;
 		if (
 			this.direction === 'update' &&
@@ -540,7 +777,14 @@ export class NotebookSynchronizer {
 				};
 				return;
 			}
-			const local = await this.host.read(info.path);
+			const inspectedLocal = await this.localFile(info.path);
+			let local = inspectedLocal?.contents ?? (inspectedLocal ? { length: inspectedLocal.size } : null);
+			let localDigest = inspectedLocal?.digest;
+			if (inspectedLocal && !inspectedLocal.contents && (entry.removed || inspectedLocal.digest !== info.digest)) {
+				local = await this.host.read(info.path);
+				localDigest = local === null ? undefined : await fingerprint(local);
+				delete this.state.localIndex[info.path];
+			}
 			if (this.direction === 'update' && (local === null || entry.removed)) {
 				this.state.notes[entry.note] = {
 					path: info.path,
@@ -553,11 +797,11 @@ export class NotebookSynchronizer {
 				};
 				return;
 			}
-			const localDigest = local === null ? undefined : await fingerprint(local);
 			const dirty = local !== null && localDigest !== previous?.digest;
 			if (entry.removed) {
 				if (dirty) await this.#preserve(info.path, local, entry.sequence);
 				if (local !== null) await this.host.remove(info.path);
+				delete this.state.localIndex[info.path];
 				this.state.notes[entry.note] = {
 					path: info.path,
 					revision: entry.sequence,
@@ -567,8 +811,12 @@ export class NotebookSynchronizer {
 				return;
 			}
 			if (local !== null && localDigest === info.digest) {
+				if (!(local instanceof Uint8Array) && info.path.toLowerCase().endsWith('.md') && info.bytes <= 262144) {
+					local = await this.host.read(info.path);
+					if (local === null || await fingerprint(local) !== info.digest) throw Object.assign(new Error('Local content changed during receive'), { code: 'PLAN_CHANGED' });
+				}
 				if (info.mtime !== undefined && this.host.mtime && await this.host.mtime(info.path) !== info.mtime)
-					await this.host.write(info.path, local, info.mtime);
+					await this.host.write(info.path, local instanceof Uint8Array ? local : await this.host.read(info.path), info.mtime);
 				this.state.notes[entry.note] = {
 					path: info.path,
 					revision: entry.sequence,
@@ -578,10 +826,9 @@ export class NotebookSynchronizer {
 					manifest: entry.manifest,
 					origin: info.origin,
 				};
-				rememberBase(this.state, entry.note, local);
+				if (local instanceof Uint8Array) rememberBase(this.state, entry.note, local);
 				return;
 			}
-			let decoded;
 			if (
 				dirty &&
 				local.length <= 262144 &&
@@ -589,7 +836,9 @@ export class NotebookSynchronizer {
 				info.path.toLowerCase().endsWith('.md') &&
 				typeof previous?.base === 'string'
 			) {
-				decoded = await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info, this.onTiming);
+				decoded = await this.api.peerContents?.(entry.note, entry.manifest, info, undefined, this.onTiming);
+				this.assertActive();
+				decoded ??= await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info, this.onTiming);
 				const merged = mergeNote(previous.base, local, decoded.contents);
 				if (merged !== undefined) {
 					await this.host.write(info.path, merged);
@@ -610,29 +859,43 @@ export class NotebookSynchronizer {
 			const wantsBytes =
 				force || info.path.toLowerCase().endsWith('.md') || info.path.startsWith('__smart_sync_configuration__/') || (this.attachmentLimit > 0 && info.bytes <= this.attachmentLimit);
 			if (wantsBytes) {
+				// Explicit attachment opens use a bounded window; background cycles retain their existing scheduling.
+				const downloadOptions = { concurrency: force ? 4 : 1, signal: this.api.signal };
+				const resumedLoad = info.bytes > 8 * 1024 * 1024 && this.api.resumeCache
+					? this.api.resumeCache.loader(load, info.segments.map(piece => piece.address)) : load;
 				if (
 					this.host.sink &&
 					info.bytes > 8 * 1024 * 1024 &&
 					!info.path.startsWith('__smart_sync_configuration__/')
 				) {
-					await unpackToSink(
+					const sinkFor = (_, bytes, digest, mtime) => { this.assertActive(); return this.host.sink(info.path, bytes, digest, mtime); };
+					const peer = await this.api.peerContents?.(entry.note, entry.manifest, info, sinkFor, this.onTiming);
+					this.assertActive();
+					if (!peer) await unpackToSink(
 						this.keys,
 						this.api.workspace,
 						entry.note,
 						entry.manifest,
-						load,
-						(_, bytes, digest, mtime) => { this.assertActive(); return this.host.sink(info.path, bytes, digest, mtime); },
+						resumedLoad,
+						sinkFor,
 						info,
 						this.onTiming,
+						downloadOptions,
 					);
 				} else {
 					const file =
 						decoded ??
-						(await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, load, info, this.onTiming));
+						(await this.api.peerContents?.(entry.note, entry.manifest, info, undefined, this.onTiming)) ??
+						(await unpackNote(this.keys, this.api.workspace, entry.note, entry.manifest, resumedLoad, info, this.onTiming, downloadOptions));
 					this.assertActive();
-					await this.host.write(info.path, file.contents, info.mtime);
+					const written = await this.host.write(info.path, file.contents, info.mtime);
+					if (typeof written?.stamp === 'string' && this.host.stamp && written.stamp === await this.host.stamp(info.path)) {
+						this.state.localIndex[info.path] = { stamp: written.stamp, digest: info.digest, size: info.bytes };
+						unsavedStates.add(this.state);
+					}
 					decoded = file;
 				}
+				this.#pendingBytes += info.bytes;
 			} else if (local !== null) {
 				// Do not overwrite existing bytes with an attachment placeholder or stale content.
 				await this.host.remove(info.path);
@@ -696,7 +959,10 @@ export class NotebookSynchronizer {
 		return Object.values(this.#treeDeletions()).find(tree => tree.members.includes(note));
 	}
 	#heldPath(path) {
-		return Object.values(this.#treeDeletions()).some(tree => path === tree.path || path.startsWith(tree.path + '/'));
+		return Object.values(this.state.pendingReceives ?? {}).some(entry =>
+			[entry.path, this.state.notes[entry.note]?.path].some(held => held &&
+				(path === held || path.startsWith(held + '/') || held.startsWith(path + '/')))) ||
+			Object.values(this.#treeDeletions()).some(tree => path === tree.path || path.startsWith(tree.path + '/'));
 	}
 	async #stageTreeDeletions(changes) {
 		if (!this.host.removeTree || this.direction === 'update') return;
@@ -741,28 +1007,34 @@ export class NotebookSynchronizer {
 			const previous = this.state.notes[entry.note];
 			if (entry.removed || !previous?.downloaded || previous.removed || (previous.kind ?? 'file') !== 'file' ||
 				this.#alreadyApplied(entry) || this.excluded(previous.path) || this.#heldPath(previous.path)) continue;
-			this.assertActive();
-			let manifest = this.#windowManifests.get(entry.manifest);
-			if (!manifest && this.batchTransfer && typeof this.api.loadBatch === 'function' && this.batchBytes >= 256 * 1024) {
-				try { manifest = (await this.timed('download', () => this.api.loadBatch([entry.manifest], this.batchBytes - 128 * 1024))).get(entry.manifest); }
-				catch (error) { if ([401, 403].includes(error?.status) || error?.name === 'AbortError') throw error; }
-			}
-			manifest ??= await this.api.load(entry.manifest);
-			const info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async () => manifest);
-			if (manifest.length <= 128 * 1024) {
-				let retained = [...this.#windowManifests.values()].reduce((sum, body) => sum + body.length, 0);
-				for (const [address, body] of this.#windowManifests) {
-					if (retained + manifest.length <= 128 * 1024) break;
-					this.#windowManifests.delete(address); retained -= body.length;
+			if (this.#receiveAttempts.has(entry.note + ':' + entry.sequence)) continue;
+			try {
+				this.assertActive();
+				let manifest = this.#windowManifests.get(entry.manifest);
+				if (!manifest && this.batchTransfer && typeof this.api.loadBatch === 'function' && this.batchBytes >= 256 * 1024) {
+					try { manifest = (await this.timed('download', () => this.api.loadBatch([entry.manifest], this.batchBytes - 128 * 1024))).get(entry.manifest); }
+					catch (error) { if ([401, 403].includes(error?.status) || error?.name === 'AbortError') throw error; }
 				}
-				this.#windowManifests.set(entry.manifest, manifest);
+				manifest ??= await this.api.load(entry.manifest);
+				const info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async () => manifest);
+				if (manifest.length <= 128 * 1024) {
+					let retained = [...this.#windowManifests.values()].reduce((sum, body) => sum + body.length, 0);
+					for (const [address, body] of this.#windowManifests) {
+						if (retained + manifest.length <= 128 * 1024) break;
+						this.#windowManifests.delete(address); retained -= body.length;
+					}
+					this.#windowManifests.set(entry.manifest, manifest);
+				}
+				// Paths and deletions keep their dependency order; only existing file content jumps the queue.
+				if (info.path !== previous.path || info.kind === 'folder' || info.digest === previous.digest) continue;
+				this.#prefetchedInfo.set(entry.note + entry.manifest, info);
+				await this.#receive(entry);
+				await this.#persist();
+				paths.push(previous.path);
+			} catch (error) {
+				this.#receiveAttempts.add(entry.note + ':' + entry.sequence);
+				await this.#recordReceiveFailure(entry, error);
 			}
-			// Paths and deletions keep their dependency order; only existing file content jumps the queue.
-			if (info.path !== previous.path || info.kind === 'folder' || info.digest === previous.digest) continue;
-			this.#prefetchedInfo.set(entry.note + entry.manifest, info);
-			await this.#receive(entry);
-			await this.#persist();
-			paths.push(previous.path);
 		}
 		return paths;
 	}
@@ -777,10 +1049,12 @@ export class NotebookSynchronizer {
 		return selected.map(([path]) => path);
 	}
 	async #cycle(target, ceiling) {
+		this.host.setRemoteReader?.(path => this.#remoteFile(path));
 		this.#bulkRemoved.clear();
 		const targets = target ? new Set(Array.isArray(target) ? target : [target]) : undefined;
 		if (this.direction === 'paused' || this.remoteMode === 'paused') return;
 		this.assertActive();
+		await this.#recoverCommit();
 		const version = this.scanVersion?.();
 		let remoteChanged = false;
 		const receivedRemovals = new Set();
@@ -810,7 +1084,15 @@ export class NotebookSynchronizer {
 			// Read all pages before applying: historical intermediate paths can be
 			// occupied by the latest files retained across a reconnect. Only each
 			// note's newest validated revision describes the desired remote state.
+			const newest = new Map(changes.map(entry => [entry.note, entry.sequence]));
+			const pending = Object.values(this.state.pendingReceives ?? {}).filter(entry =>
+				(newest.get(entry.note) ?? 0) < entry.sequence);
+			if (ceiling !== undefined && pending.some(entry => entry.sequence > ceiling))
+				throw Object.assign(Error('Plan changed'), { code: 'PLAN_CHANGED' });
+			changes.push(...pending);
+			changes.sort((a, b) => a.sequence - b.sequence);
 			const heads = new Map(changes.map((entry) => [entry.note, entry]));
+			this.#remoteHeads = heads;
 			const current = changes.filter(entry => heads.get(entry.note) === entry);
 			await this.beforeDelete(
 				[...heads.values()].filter(
@@ -830,6 +1112,8 @@ export class NotebookSynchronizer {
 						for (const entry of batch.entries) {
 							if (!validEntry(entry, cursor)) throw Error('Invalid change sequence');
 							cursor = entry.sequence;
+							this.#remoteHeads.set(entry.note, entry);
+							this.#remoteFiles.clear();
 							fresh.push(entry);
 						}
 						if (!batch.more) break;
@@ -840,20 +1124,24 @@ export class NotebookSynchronizer {
 			}
 			await this.#stageTreeDeletions(current);
 			await this.#removeCompleteTrees(current.filter(entry => !this.#heldTree(entry.note)));
-			let windowIndex = 0, nextPrefetch = 0;
-			for (const entry of changes) {
+			let windowIndex = 0, nextPrefetch = 0, ahead;
+			try { for (const entry of changes) {
 				if (!targets && ceiling === undefined) await this.#prioritizeContent();
 				const held = this.#heldTree(entry.note);
 				if (held && heads.get(entry.note) === entry) {
 					held.entries[entry.note] = entry;
-					this.state.cursor = entry.sequence;
+					this.state.cursor = Math.max(this.state.cursor, entry.sequence);
 					unsavedStates.add(this.state);
 					await this.#persist();
 					replayCursorDirty = false;
 					continue;
 				}
+				if (this.#alreadyApplied(entry) && (this.state.pendingReceives?.[entry.note]?.sequence ?? Infinity) <= entry.sequence) {
+					delete this.state.pendingReceives[entry.note];
+					this.#receiveFailures.delete(entry.note);
+				}
 				if (heads.get(entry.note) !== entry || this.#alreadyApplied(entry)) {
-					this.state.cursor = entry.sequence;
+					this.state.cursor = Math.max(this.state.cursor, entry.sequence);
 					replayCursorDirty = true;
 					continue;
 				}
@@ -861,19 +1149,46 @@ export class NotebookSynchronizer {
 				if (windowIndex >= nextPrefetch) {
 					if (windowIndex > 0) await this.#contentPoll?.();
 					const windowEntries = current.slice(windowIndex, windowIndex + this.batchFiles);
-					if (!windowEntries.some(item => item.removed)) nextPrefetch = windowIndex + await this.#prefetch(windowEntries);
+					if (!windowEntries.some(item => item.removed)) {
+						const matches = ahead?.index === windowIndex;
+						const pending = ahead ? await ahead.promise : undefined;
+						if (pending?.error) throw pending.error;
+						const prepared = matches ? pending : undefined;
+						ahead = undefined;
+						const window = prepared?.window ?? await this.#prefetch(windowEntries, this.#windowManifests);
+						this.#cachedObjects = window.cached;
+						this.#windowManifests = window.manifests;
+						this.#prefetchedInfo = window.info;
+						nextPrefetch = windowIndex + window.covered;
+						const next = current.slice(nextPrefetch, nextPrefetch + this.batchFiles);
+						if (this.batchTransfer && next.length && !next.some(item => item.removed)) {
+							// One next window only; receive/write/checkpoint remain serial.
+							ahead = { index: nextPrefetch, promise: this.#prefetch(next, window.manifests)
+								.then(window => ({ window }), error => ({ error })) };
+						}
+					}
 				}
 				this.onProgress(t('msg_f6a511393c', { sequence: entry.sequence }));
 				await this.#receive(entry);
 				const applied = this.state.notes[entry.note];
 				if (entry.removed && applied?.removed && applied.revision === entry.sequence) receivedRemovals.add(applied.path);
-				this.state.cursor = entry.sequence;
+				this.state.cursor = Math.max(this.state.cursor, entry.sequence);
 				await this.#persist();
 				replayCursorDirty = false;
+			} } finally {
+				// Settle speculative reads before run cleanup, including failed receives.
+				if (ahead) await ahead.promise;
 			}
-			// Never persist a cursor beyond an unapplied current revision. Skipped
+			// Unapplied revisions remain in the durable retry queue. Skipped
 			// history after the final applied change needs only one checkpoint.
 			if (replayCursorDirty) await this.#persist();
+		}
+		// A mobile-compatible manifest update can unblock files skipped on an earlier run.
+		for (const [note, value] of Object.entries(this.state.notes)) {
+			if (value.platformSkipped === 'desktop-plugin' && !value.removed && !this.excluded(value.path)) {
+				await this.#receive({ note, manifest: value.manifest, sequence: value.revision, removed: false });
+				await this.#persist();
+			}
 		}
 		await this.#finishTreeDeletions();
 		if (receivedRemovals.size) {
@@ -890,8 +1205,24 @@ export class NotebookSynchronizer {
 	}
 	async #send(targets, ceiling, version, remoteChanged, priorityPaths) {
 		if (this.#completed.some(task => task.direction === 'receive')) await this.#flush();
+		if (Object.values(this.state.pendingReceives ?? {}).some(entry => !entry.path)) return;
 		const cache = this.scanCache;
-		if (!targets && ceiling === undefined && !remoteChanged && version !== undefined &&
+		let incrementalPlan;
+		if (!priorityPaths && !targets && ceiling === undefined && this.incrementalInventory && this.scanPolicy !== undefined) {
+			incrementalPlan = this.incrementalInventory.begin(this.state, this.scanPolicy,
+				remoteChanged || Object.keys(this.renames).length > 0 || Object.keys(this.state.pendingReceives ?? {}).length > 0 || Object.keys(this.state.pendingTreeDeletions ?? {}).length > 0);
+			if (!incrementalPlan.full) {
+				if (!incrementalPlan.paths.length) { this.incrementalInventory.finish(incrementalPlan); return; }
+				const known = new Map();
+				for (const note of Object.values(this.state.notes)) if (!note.removed && note.downloaded && (note.kind ?? 'file') === 'file')
+					known.set(note.path, (known.get(note.path) ?? 0) + 1);
+				if (incrementalPlan.paths.some(path => known.get(path) !== 1 || this.excluded(path))) incrementalPlan.full = true;
+				else {
+					priorityPaths = incrementalPlan.paths;
+				}
+			}
+		}
+		if (!incrementalPlan && !targets && ceiling === undefined && !remoteChanged && version !== undefined &&
 			!Object.keys(this.renames).length && cache?.state === this.state &&
 			cache.version === version && Date.now() >= cache.at && Date.now() - cache.at < 60000) return;
 		let files = (priorityPaths ?? await this.host.list()).filter(path => !this.#heldPath(path));
@@ -969,6 +1300,7 @@ export class NotebookSynchronizer {
 		const used = new Set(Object.keys(this.state.notes));
 		let queuedBytes = 0, queuedStartedAt = 0;
 		const flushUploads = async () => {
+			const groupedCheckpoint = this.commitJournal && this.checkpointSize > 1;
 			const jobs = this.#queuedUploads.splice(0);
 			queuedBytes = 0;
 			queuedStartedAt = 0;
@@ -990,7 +1322,7 @@ export class NotebookSynchronizer {
 					if (job.packed.info.mtime !== undefined && await this.host.mtime(job.path) !== job.packed.info.mtime)
 						throw Object.assign(new Error('Source time changed during batch upload'), { code: 'PLAN_CHANGED' });
 				}
-				const reply = await this.api.commitBatch(jobs.map(job => ({ note: job.id, pathKey: job.pathKey, expected: job.previous?.revision ?? 0, manifest: job.packed.manifest, logicalBytes: job.packed.info.bytes, objects: [...job.packed.info.segments.map(piece => piece.address), job.packed.manifest], removed: false })));
+				const reply = { entries: await this.#submitCommit(jobs.map(job => ({ note: job.id, pathKey: job.pathKey, expected: job.previous?.revision ?? 0, manifest: job.packed.manifest, logicalBytes: job.packed.info.bytes, objects: [...job.packed.info.segments.map(piece => piece.address), job.packed.manifest], removed: false })), jobs.map(job => ({ path: job.path, kind: 'file', digest: job.digest })), true) };
 				if (!Array.isArray(reply?.entries) || reply.entries.length !== jobs.length || reply.entries.some((entry, index) => !validEntry(entry, 0) || entry.note !== jobs[index].id || entry.manifest !== jobs[index].packed.manifest || entry.removed)) throw Error('Invalid batch commit acknowledgement');
 				for (let index = 0; index < jobs.length; index++) {
 					const job = jobs[index];
@@ -1000,8 +1332,11 @@ export class NotebookSynchronizer {
 					byPath.set(job.path, [job.id, this.state.notes[job.id]]);
 					if (job.contents !== undefined) rememberBase(this.state, job.id, job.contents);
 					this.#completed.push({ ...job.task, status: 'done', workMilliseconds: Math.max(0, performance.now() - job.task.workStartedAt), completedAt: performance.now() });
-					await this.#persist();
+					if (!groupedCheckpoint) await this.#persist();
 				}
+				// The durable intent covers the entire bounded batch until every receipt is applied.
+				if (groupedCheckpoint) await this.#persist(jobs.length);
+				await this.#finishCommit(false, true);
 			} catch (error) {
 				for (const job of jobs) await this.onTask({ ...job.task, status: 'failed', error }).catch(() => {});
 				throw error;
@@ -1045,6 +1380,8 @@ export class NotebookSynchronizer {
 				folderSet.has(path) ? 'folder' : 'file',
 				folderSet.has(path) ? '' : digests.get(path),
 			]);
+		const scanTotal = paths.filter(path => !this.excluded(path)).length;
+		this.onProgress(t('sync.checked', { checked: 0, total: scanTotal }), { checked: 0, total: scanTotal });
 		let checked = 0,
 			lastYield = Date.now();
 		for (const raw of paths) {
@@ -1063,7 +1400,7 @@ export class NotebookSynchronizer {
 				kind === 'folder'
 					? { contents: new Uint8Array(), digest: await fingerprint(new Uint8Array()) }
 					: await this.localFile(path);
-			if (file === null && priorityPaths) continue;
+			if (file === null && priorityPaths && !incrementalPlan) continue;
 			if (file === null)
 				throw Object.assign(new Error('Inventory changed during synchronization'), {
 					code: 'PLAN_CHANGED',
@@ -1071,16 +1408,16 @@ export class NotebookSynchronizer {
 			const digest = file.digest;
 			this.assertActive();
 			let found = byPath.get(path);
-			// A parent tombstone may arrive before its children. The still occupied
-			// physical folder belongs to that deletion, rather than a user recreation.
-			if (kind === 'folder' && !found && pendingDeletedFolders.has(path)) continue;
-			if (++checked % 100 === 0) {
-				this.onProgress(t('sync.checked', { checked, total: paths.length }));
+			if (++checked % 100 === 0 || checked === scanTotal) {
+				this.onProgress(t('sync.checked', { checked, total: scanTotal }), { checked, total: scanTotal });
 				if (Date.now() - lastYield >= 16) {
 					await this.yieldWork();
 					lastYield = Date.now();
 				}
 			}
+			// A parent tombstone may arrive before its children. The still occupied
+			// physical folder belongs to that deletion, rather than a user recreation.
+			if (kind === 'folder' && !found && pendingDeletedFolders.has(path)) continue;
 			if (!found) {
 				const aliases = [];
 				if (this.host.sameEntry) for (const candidate of bySpelling.get(path.toLowerCase()) ?? []) {
@@ -1211,14 +1548,14 @@ export class NotebookSynchronizer {
 						if (file.mtime !== undefined && await this.host.mtime(path) !== file.mtime)
 							throw Object.assign(new Error('Source time changed during upload'), { code: 'PLAN_CHANGED' });
 					}
-					const committed = await this.api.commit(id, {
+					const [committed] = await this.#submitCommit([{ note: id,
 						pathKey,
 						expected: previous?.revision ?? 0,
 						manifest: packed.manifest,
 						logicalBytes: packed.info.bytes,
 						objects: [...packed.info.segments.map((piece) => piece.address), packed.manifest],
 						removed: false,
-					});
+					}], [{ path, kind, digest }]);
 					if (
 						!validEntry(committed, 0) ||
 						committed.note !== id ||
@@ -1239,14 +1576,17 @@ export class NotebookSynchronizer {
 					if (previous) byPath.delete(previous.path);
 					byPath.set(path, [id, this.state.notes[id]]);
 					if (kind === 'file') rememberBase(this.state, id, contents);
-					await this.#persist();
+					await this.#finishCommit();
 				} finally {
 					await packed.dispose?.();
 				}
 			});
 		}
 		await flushUploads();
-		if (priorityPaths) return;
+		if (priorityPaths) {
+			if (incrementalPlan) this.incrementalInventory.finish(incrementalPlan);
+			return;
+		}
 		if (!targets && ceiling === undefined) await this.#prioritizeContent();
 		const deletions = [];
 		for (const [id, previous] of Object.entries(this.state.notes)) {
@@ -1275,7 +1615,7 @@ export class NotebookSynchronizer {
 				for (const [, previous] of batch)
 					if (this.host.exists ? await this.host.exists(previous.path) : await this.host.read(previous.path) !== null)
 						throw Object.assign(new Error('Local path reappeared before batch deletion'), { code: 'PLAN_CHANGED' });
-				const reply = await this.api.commitBatch(batch.map(([note, previous]) => ({ note, expected: previous.revision, removed: true })));
+				const reply = { entries: await this.#submitCommit(batch.map(([note, previous]) => ({ note, expected: previous.revision, removed: true })), batch.map(([, previous]) => previous), true) };
 				if (!Array.isArray(reply?.entries) || reply.entries.length !== batch.length || reply.entries.some((entry,index) => !validEntry(entry,0) || entry.note !== batch[index][0] || !entry.removed)) throw Error('Invalid batch deletion acknowledgement');
 				for (let index = 0; index < batch.length; index++) {
 					const [id, previous] = batch[index];
@@ -1284,6 +1624,7 @@ export class NotebookSynchronizer {
 						await this.#persist();
 					});
 				}
+				await this.#finishCommit(false, true);
 			}
 		}
 		for (const [id, previous] of batchDelete ? [] : deletions) {
@@ -1296,10 +1637,7 @@ export class NotebookSynchronizer {
 					throw Object.assign(new Error('Local path reappeared before deletion'), {
 						code: 'PLAN_CHANGED',
 					});
-				const committed = await this.api.commit(id, {
-					expected: previous.revision,
-					removed: true,
-				});
+				const [committed] = await this.#submitCommit([{ note: id, expected: previous.revision, removed: true }], [previous]);
 				if (!validEntry(committed, 0) || committed.note !== id || !committed.removed)
 					throw new Error('Invalid deletion acknowledgement');
 				this.state.notes[id] = {
@@ -1308,11 +1646,12 @@ export class NotebookSynchronizer {
 					removed: true,
 					downloaded: false,
 				};
-				await this.#persist();
+				await this.#finishCommit();
 			});
 		}
 		for (const path of Object.keys(this.state.localIndex))
 			if (!present.has(path)) { delete this.state.localIndex[path]; unsavedStates.add(this.state); }
+		if (incrementalPlan) this.incrementalInventory.finish(incrementalPlan);
 		if (cache && !targets && ceiling === undefined && version !== undefined && this.scanVersion() === version)
 			Object.assign(cache, { state: this.state, version, at: Date.now() });
 	}

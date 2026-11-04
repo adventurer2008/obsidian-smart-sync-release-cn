@@ -26,7 +26,21 @@ export class TFolder {
 	}
 }
 function element() {
+	const classes = new Set();
 	return {
+		classList: {
+			add: (...names) => names.forEach(name => classes.add(name)),
+			remove: (...names) => names.forEach(name => classes.delete(name)),
+			contains: name => classes.has(name),
+			toggle: (name, force) => { const enabled = force ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; },
+		},
+		querySelectorAll(selector) {
+			return this.children.filter(child => child.isConnected).flatMap(child => [
+				...(selector.startsWith('.') ? child.classList.contains(selector.slice(1)) : child.tag === selector) ? [child] : [],
+				...child.querySelectorAll(selector),
+			]);
+		},
+		querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; },
 		text: '',
 		value: '',
 		isConnected: true,
@@ -47,6 +61,7 @@ function element() {
 		createEl(tag, options = {}) {
 			const child = element();
 			child.tag = tag;
+			for (const name of (options.cls ?? '').split(/\s+/).filter(Boolean)) child.classList.add(name);
 			child.text = options.text ?? '';
 			this.children.push(child);
 			return child;
@@ -121,9 +136,12 @@ export class PluginSettingTab {
 		this.containerEl = element();
 	}
 }
+export function requireApiVersion() { return typeof PluginSettingTab.prototype.getSettingDefinitions === 'function'; }
 export class Setting {
 	constructor(container) {
 		this.containerEl = container;
+		this.settingEl = element();
+		this.settingEl.parentElement = container;
 		this.controls = [];
 		container.settings?.push(this);
 	}
