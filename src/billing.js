@@ -1,12 +1,32 @@
-import { formatStorageSize } from './i18n.js';
+import { formatStorageSize, locale } from './i18n.js';
 
 const pending = new Set(['creating', 'pending', 'uncertain']);
 const mountedCards = new WeakMap();
-const statuses = { creating: '正在生成订单', pending: '等待付款', expired: '订单已关闭', uncertain: '正在核实付款结果，请勿重复付款', paid: '付款成功', rejected: '支付订单创建失败', refund_pending: '退款处理中', refunded: '已退款' };
+// noopener/native hosts may return null even after opening the browser.
+export function launchBillingBrowser(view,href,{live,fallback,delay=1500}) {
+	const doc=view.document;
+	let done=false,timer;
+	const current=()=>{try{return live();}catch{return false;}};
+	const cleanup=()=>{
+		done=true;view.clearTimeout(timer);
+		view.removeEventListener?.('blur',depart);view.removeEventListener?.('pagehide',depart);
+		doc?.removeEventListener?.('visibilitychange',visibility);
+	};
+	const depart=()=>cleanup();
+	const visibility=()=>{if(doc.hidden)cleanup();};
+	const recover=()=>{if(done)return;const valid=current()&&!doc?.hidden;cleanup();if(valid)fallback();};
+	if(!current()||doc?.hidden){cleanup();return cleanup;}
+	view.addEventListener?.('blur',depart);view.addEventListener?.('pagehide',depart);
+	doc?.addEventListener?.('visibilitychange',visibility);
+	try{view.open(href,'_blank','noopener,noreferrer');}catch{recover();return cleanup;}
+	if(!done)timer=view.setTimeout(recover,delay);
+	return cleanup;
+}
+const statuses = locale === 'en' ? {creating:'Creating order',pending:'Awaiting payment',expired:'Order closed',uncertain:'Verifying payment; do not pay again',paid:'Payment successful',rejected:'Payment order failed',refund_pending:'Refund pending',refunded:'Refunded'} : { creating: '正在生成订单', pending: '等待付款', expired: '订单已关闭', uncertain: '正在核实付款结果，请勿重复付款', paid: '付款成功', rejected: '支付订单创建失败', refund_pending: '退款处理中', refunded: '已退款' };
 export function capacityWarning(data) {
 	const used = data?.usage?.logicalBytes, capacity = data?.entitlement?.logical;
 	if (!Number.isSafeInteger(used) || !Number.isSafeInteger(capacity) || capacity < 0 || used <= capacity) return undefined;
-	return { title: '套餐容量不足', message: `已用 ${formatStorageSize(used)} / ${formatStorageSize(capacity)}，请增加额度后继续上传。`, action: '购买更多额度' };
+	return locale === 'en' ? {title:'Plan capacity exceeded',message:`Used ${formatStorageSize(used)} / ${formatStorageSize(capacity)}. Increase capacity to continue uploading.`,action:'Get more storage'} : { title: '套餐容量不足', message: `已用 ${formatStorageSize(used)} / ${formatStorageSize(capacity)}，请增加额度后继续上传。`, action: '购买更多额度' };
 }
 export function renewalReminderAt(ends) {
 	const value = new Date(ends), day = value.getUTCDate();
@@ -20,7 +40,7 @@ export function billingCard(data, connected, now = Date.now()) {
 	const rights = data?.entitlement, order = data?.currentOrder;
 	const hidePendingOrder = rights?.paid === true && rights.ends > now && pending.has(order?.status) && order.failureCode !== 'paid_plan_conflict';
 	const showOrder = order && !hidePendingOrder && (order.status !== 'paid' || order.purpose === 'test' || order.failureCode === 'paid_plan_conflict');
-	const free = rights?.plan === 'cn-free' && rights?.paid !== true;
+	const free = ['cn-free','global-free'].includes(rights?.plan) && rights?.paid !== true;
 	const purchased = !free && (rights?.paid === true || data?.everPurchased === true);
 	const ends = rights?.ends ?? data?.lastPurchase?.ends;
 	const renewed = data?.lastPurchase?.status === 'paid' && data.lastPurchase.renewal === true;
@@ -31,7 +51,7 @@ export function billingCard(data, connected, now = Date.now()) {
 	// A service fallback quota is not an activated subscription owned by this user.
 	const capacity = connected && (rights?.paid === true || free) ? rights.logical : undefined;
 	const usage = data?.usage?.logicalBytes;
-	return {
+	const model = {
 		overage: connected && capacityWarning(data) ? '已超出套餐容量' : '',
 		free, label: free ? '购买更多额度' : purchased ? '续费' : '购买', prominent: !purchased || due || expired,
 		badge: !purchased ? '' : refunded ? '已退款' : expired ? '已到期' : due ? '即将到期' : '已开通',
@@ -45,13 +65,28 @@ export function billingCard(data, connected, now = Date.now()) {
 		order: showOrder ? [purchased ? order.title : '', order.purpose === 'test' ? '1分钱测试' : '', order.failureCode === 'paid_plan_conflict' ? '付款已收到，待核对' : statuses[order.status] ?? '订单处理中'].filter(Boolean).join(' · ') + (order.status === 'paid' && order.purpose === 'test' ? '，套餐权益未改变' : '') : '',
 		resume: order && pending.has(order.status) ? order.id : undefined,
 	};
+	if (locale === 'en') {
+		const title = id => { const match=/^global-([1-9][0-9]*)gb-(month|year)$/.exec(id ?? ''); return match ? `${match[1]} GB · ${match[2] === 'year' ? 'Yearly' : 'Monthly'}` : 'Subscription'; };
+		Object.assign(model, {
+			overage: connected && capacityWarning(data) ? 'Plan capacity exceeded' : '',
+			label: free ? 'Get more storage' : purchased ? 'Manage plan' : 'Choose a plan',
+			badge: !purchased ? '' : refunded ? 'Refunded' : expired ? 'Expired' : due ? 'Expiring soon' : 'Active',
+			title: free ? rights.plan === 'global-free' ? 'Free · 50 MB' : 'Free · 100 MB' : purchased ? (rights?.paid ? 'Current plan: ' : '') + title(rights?.paid ? rights.plan : data?.lastPurchase?.plan) : '',
+			usage: connected && Number.isFinite(capacity) ? Number.isFinite(usage) ? `Used ${formatStorageSize(usage)} / ${formatStorageSize(capacity)}` : `Plan capacity ${formatStorageSize(capacity)} · usage pending` : '',
+			upcoming: rights?.upcoming ? `Next plan: ${title(rights.upcoming.plan)}, starts ${new Date(rights.upcoming.starts).toLocaleDateString('en-US')}` : '',
+			expires: free && rights.starts ? `Activated: ${new Date(rights.starts).toLocaleDateString('en-US')}` : purchased && ends && !refunded ? `Access ends: ${new Date(ends).toLocaleDateString('en-US')}` : '',
+			help: data?.testMode ? 'Stripe test mode only. No real charges. Manage test renewal and cancellation in billing.' : free ? 'All vaults share this account’s free capacity.' : refunded ? 'Plan refunded. You may choose another plan.' : expired ? 'Your paid period ended. Manage your subscription to continue.' : purchased ? 'All vaults share this account’s capacity. Manage automatic renewal and cancellation in billing.' : '',
+			order: showOrder ? [order.title, statuses[order.status] ?? 'Processing order'].filter(Boolean).join(' · ') : '',
+		});
+	}
+	return model;
 }
 
 // Mounted only in the CN settings view. Every request/result is tied to its identity.
 export function mountBillingCard(setting, { connected, load, open, live, onError, target, now = Date.now }) {
 	if (!setting.infoEl || !setting.controlEl) return () => {};
 	mountedCards.get(setting.settingEl)?.();
-	setting.setName('我的套餐');
+	setting.setName(locale === 'en' ? 'My plan' : '我的套餐');
 	setting.settingEl.classList.add('smart-sync-billing');
 	const doc = setting.infoEl.ownerDocument;
 	const view = target ?? doc.defaultView;
@@ -61,7 +96,7 @@ export function mountBillingCard(setting, { connected, load, open, live, onError
 	const upcoming = add(setting.infoEl, 'div', 'smart-sync-plan-help');
 	const usage = add(setting.infoEl, 'div', 'smart-sync-plan-usage');
 	const overage = add(setting.infoEl, 'div', 'smart-sync-plan-order'); overage.setAttribute('role', 'status');
-	const progress = add(setting.infoEl, 'progress', 'smart-sync-plan-progress'); progress.max = 1; progress.setAttribute('aria-label', '套餐容量使用情况');
+	const progress = add(setting.infoEl, 'progress', 'smart-sync-plan-progress'); progress.max = 1; progress.setAttribute('aria-label', locale === 'en' ? 'Plan storage usage' : '套餐容量使用情况');
 	const expires = add(setting.infoEl, 'div', 'smart-sync-plan-expiry');
 	const help = add(setting.infoEl, 'div', 'smart-sync-plan-help');
 	const status = add(setting.infoEl, 'div', 'smart-sync-plan-order'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
@@ -82,14 +117,14 @@ export function mountBillingCard(setting, { connected, load, open, live, onError
 		progress.hidden = model.ratio === null; progress.value = model.ratio ?? 0;
 		button.textContent = model.label; button.disabled = acting; button.hidden = !model.prominent;
 		button.classList.toggle('mod-cta', model.prominent); button.classList.toggle('is-prominent', model.prominent);
-		if (connected && !data) { badge.textContent = '读取中'; badge.hidden = false; title.textContent = '正在读取套餐信息'; title.hidden = false; button.textContent = '读取中…'; button.disabled = true; }
+		if (connected && !data) { badge.textContent = locale === 'en' ? 'Loading' : '读取中'; badge.hidden = false; title.textContent = locale === 'en' ? 'Loading plan information' : '正在读取套餐信息'; title.hidden = false; button.textContent = locale === 'en' ? 'Loading…' : '读取中…'; button.disabled = true; }
 	}
 	async function refresh() {
 		view.clearTimeout(timer);
 		if (!current() || loading || now() >= deadline || doc.hidden) return;
 		loading = true;
 		try { const result = await load(); if (current()) { data = result; render(); } }
-		catch { if (current()) status.textContent = '套餐信息暂时无法更新，请稍后重新打开设置。'; }
+		catch { if (current()) status.textContent = locale === 'en' ? 'Plan information is unavailable. Reopen settings shortly.' : '套餐信息暂时无法更新，请稍后重新打开设置。'; }
 		finally { loading = false; if (current() && now() < deadline) timer = view.setTimeout(() => { void refresh(); }, billingCard(data, connected, now()).resume ? 5000 : 30000); }
 	}
 	const focus = () => { if (current()) { deadline = now() + 15 * 60000; void refresh(); } };

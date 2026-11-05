@@ -14,6 +14,7 @@ import { BATCH_BYTES } from './client.js';
 
 // Dirty state follows the connection across short-lived engine instances, including failed saves.
 const unsavedStates = new WeakSet();
+const isMarkdown = path => path.toLowerCase().endsWith('.md');
 
 export function emptyState() {
 	return { format: 3, cursor: 0, notes: {}, conflicts: [] };
@@ -411,6 +412,8 @@ export class NotebookSynchronizer {
 	#receivePaths = new Map();
 	#receiveFailures = new Map();
 	#receiveAttempts = new Set();
+	#classifiedInfo = new Map();
+	#classifiedBytes = 0;
 	#checkpointFailed = false;
 	run(target, ceiling) {
 		if (this.#running) return this.#running;
@@ -444,6 +447,8 @@ export class NotebookSynchronizer {
 				this.#cachedObjects.clear();
 				this.#windowManifests.clear();
 				this.#prefetchedInfo.clear();
+				this.#classifiedInfo.clear();
+				this.#classifiedBytes = 0;
 				this.#contentPoll = undefined;
 				this.#batching = false;
 				this.#running = undefined;
@@ -504,7 +509,23 @@ export class NotebookSynchronizer {
 		return (previous?.revision ?? 0) >= entry.sequence &&
 			(previous.revision !== entry.sequence || previous.downloaded || previous.removed || entry.removed || this.excluded(previous.path));
 	}
-	async #prefetch(entries, retained = new Map()) {
+	#classification(entry, consume = false) {
+		const cached = this.#classifiedInfo.get(entry.manifest);
+		if (cached?.note !== entry.note) return;
+		if (consume) { this.#classifiedInfo.delete(entry.manifest); this.#classifiedBytes -= cached.bytes; }
+		return cached.info;
+	}
+	#rememberClassification(entry, info, bytes) {
+		if (bytes > 128 * 1024) return;
+		const previous = this.#classifiedInfo.get(entry.manifest);
+		if (previous) { this.#classifiedInfo.delete(entry.manifest); this.#classifiedBytes -= previous.bytes; }
+		for (const [address, cached] of this.#classifiedInfo) {
+			if (this.#classifiedBytes + bytes <= 128 * 1024) break;
+			this.#classifiedInfo.delete(address); this.#classifiedBytes -= cached.bytes;
+		}
+		this.#classifiedInfo.set(entry.manifest, { note: entry.note, info, bytes }); this.#classifiedBytes += bytes;
+	}
+	async #prefetch(entries, retained = new Map(), metadataOnly = false) {
 		// Prepare a private window. Read-ahead must never replace the active
 		// receiver's caches or mutate its task, cursor or checkpoint state.
 		const window = { cached: new Map(), manifests: new Map(), info: new Map(), covered: entries.length };
@@ -528,6 +549,7 @@ export class NotebookSynchronizer {
 			let metadataBudget = 128 * 1024;
 			for (const [address, body] of manifests) if (body.length <= metadataBudget) { window.manifests.set(address, body); metadataBudget -= body.length; }
 			window.cached = manifests;
+			if (metadataOnly) return window;
 			let available = this.batchBytes - 128 * 1024 - [...manifests.values()].reduce((sum, body) => sum + body.length, 0);
 			const pieces = new Set();
 			let covered = 0;
@@ -535,7 +557,7 @@ export class NotebookSynchronizer {
 				if (entry.removed || this.#alreadyApplied(entry)) { covered++; continue; }
 				if (!manifests.has(entry.manifest)) break;
 				let info;
-				try { info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async address => manifests.get(address)); }
+				try { info = this.#classification(entry, true) ?? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async address => manifests.get(address)); }
 				catch { covered++; continue; } // The ordinary per-file task performs and reports the integrity failure.
 				window.info.set(entry.note + entry.manifest, info);
 				const previous = this.state.notes[entry.note];
@@ -676,7 +698,7 @@ export class NotebookSynchronizer {
 		}
 		const load = (address) => this.#load(address);
 		const infoKey = entry.note + entry.manifest;
-		const info = this.#prefetchedInfo.get(infoKey) ?? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, load);
+		const info = this.#prefetchedInfo.get(infoKey) ?? this.#classification(entry, true) ?? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, load);
 		this.#prefetchedInfo.delete(infoKey);
 		if (this.excluded(info.path, true)) return;
 		this.#active.path = info.path;
@@ -1005,7 +1027,7 @@ export class NotebookSynchronizer {
 		const paths = [];
 		for (const entry of new Map(entries.map(item => [item.note, item])).values()) {
 			const previous = this.state.notes[entry.note];
-			if (entry.removed || !previous?.downloaded || previous.removed || (previous.kind ?? 'file') !== 'file' ||
+			if (entry.removed || !previous?.downloaded || previous.removed || !isMarkdown(previous.path) || (previous.kind ?? 'file') !== 'file' ||
 				this.#alreadyApplied(entry) || this.excluded(previous.path) || this.#heldPath(previous.path)) continue;
 			if (this.#receiveAttempts.has(entry.note + ':' + entry.sequence)) continue;
 			try {
@@ -1016,7 +1038,7 @@ export class NotebookSynchronizer {
 					catch (error) { if ([401, 403].includes(error?.status) || error?.name === 'AbortError') throw error; }
 				}
 				manifest ??= await this.api.load(entry.manifest);
-				const info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async () => manifest);
+				const info = this.#classification(entry) ?? await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async () => manifest);
 				if (manifest.length <= 128 * 1024) {
 					let retained = [...this.#windowManifests.values()].reduce((sum, body) => sum + body.length, 0);
 					for (const [address, body] of this.#windowManifests) {
@@ -1026,7 +1048,7 @@ export class NotebookSynchronizer {
 					this.#windowManifests.set(entry.manifest, manifest);
 				}
 				// Paths and deletions keep their dependency order; only existing file content jumps the queue.
-				if (info.path !== previous.path || info.kind === 'folder' || info.digest === previous.digest) continue;
+				if (info.path !== previous.path || !isMarkdown(info.path) || info.kind === 'folder' || info.digest === previous.digest) continue;
 				this.#prefetchedInfo.set(entry.note + entry.manifest, info);
 				await this.#receive(entry);
 				await this.#persist();
@@ -1038,9 +1060,54 @@ export class NotebookSynchronizer {
 		}
 		return paths;
 	}
-	async #prioritizeContent() {
+	async #notesFirst(entries) {
+		const ranked = [];
+		for (let offset = 0; offset < entries.length; offset += this.batchFiles) {
+			this.assertActive();
+			const batch = entries.slice(offset, offset + this.batchFiles);
+			const metadata = await this.#prefetch(batch, this.#windowManifests, true);
+			for (const entry of batch) {
+				this.assertActive();
+				let rank = 2, path;
+				const previous = this.state.notes[entry.note];
+				if (entry.removed || this.#alreadyApplied(entry)) rank = 0;
+				else try {
+					const body = metadata.cached.get(entry.manifest) ?? this.#windowManifests.get(entry.manifest) ?? await this.api.load(entry.manifest);
+					const info = await inspectNote(this.keys, this.api.workspace, entry.note, entry.manifest, async () => body);
+					this.#rememberClassification(entry, info, body.length);
+					path = info.path;
+					// Structural changes retain feed order before independently transferable bodies.
+					rank = info.kind === 'folder' || (previous && previous.path !== path) ? 0 : isMarkdown(path) ? 1 : 2;
+					if (body.length <= 128 * 1024) {
+						let size = [...this.#windowManifests.values()].reduce((sum, bytes) => sum + bytes.length, 0);
+						for (const [address, bytes] of this.#windowManifests) {
+							if (size + body.length <= 128 * 1024) break;
+							this.#windowManifests.delete(address); size -= bytes.length;
+						}
+						this.#windowManifests.set(entry.manifest, body);
+					}
+				} catch (error) {
+					if (this.api.signal?.aborted || error?.name === 'AbortError' || [401, 403].includes(error?.status)) throw error;
+					// Ordinary receiving reports per-file metadata failures and persists retries.
+				}
+				ranked.push({ entry, rank, path });
+			}
+		}
+		const ordered = ranked.toSorted((a, b) => a.rank - b.rank || a.entry.sequence - b.entry.sequence);
+		if (ordered.some((item, index) => item !== ranked[index])) {
+			// Before advancing a reordered cursor, durably retain every unapplied head.
+			// Existing format-3 retry records also let older clients resume after rollback.
+			const pending = this.state.pendingReceives ??= {};
+			for (const { entry, path } of ranked) if (!this.#alreadyApplied(entry))
+				pending[entry.note] = { ...entry, ...(path ? { path } : {}) };
+			unsavedStates.add(this.state);
+			await this.#flush();
+		}
+		return { entries: ordered.map(item => item.entry), ranks: new Map(ordered.map(item => [item.entry.note, item.rank])) };
+	}
+	async #prioritizeContent(markdownOnly = true) {
 		if (['receive', 'paused'].includes(this.direction) || ['receive', 'paused'].includes(this.remoteMode)) return [];
-		const selected = [...this.contentPriorities].slice(0, 16);
+		const selected = [...this.contentPriorities].filter(([path]) => !markdownOnly || isMarkdown(path)).slice(0, 16);
 		if (!selected.length) return [];
 		this.assertActive();
 		await this.#send(undefined, undefined, undefined, false, selected.map(([path]) => path).filter(path => !renameSources(path, this.renames).length));
@@ -1059,7 +1126,7 @@ export class NotebookSynchronizer {
 		let remoteChanged = false;
 		const receivedRemovals = new Set();
 		if (this.direction !== 'send' && this.remoteMode !== 'send') {
-			const changes = [];
+			let changes = [];
 			let replayCursorDirty = false;
 			let cursor = this.state.cursor;
 			for (;;) {
@@ -1093,7 +1160,7 @@ export class NotebookSynchronizer {
 			changes.sort((a, b) => a.sequence - b.sequence);
 			const heads = new Map(changes.map((entry) => [entry.note, entry]));
 			this.#remoteHeads = heads;
-			const current = changes.filter(entry => heads.get(entry.note) === entry);
+			let current = changes.filter(entry => heads.get(entry.note) === entry);
 			await this.beforeDelete(
 				[...heads.values()].filter(
 					(entry) =>
@@ -1101,6 +1168,9 @@ export class NotebookSynchronizer {
 				).length,
 				{ direction: 'receive' },
 			);
+			const receivePlan = await this.#notesFirst(current);
+			current = receivePlan.entries;
+			changes = current;
 			if (!targets && ceiling === undefined) {
 				await this.#receiveContent(current);
 				this.#contentPoll = async () => {
@@ -1124,8 +1194,17 @@ export class NotebookSynchronizer {
 			}
 			await this.#stageTreeDeletions(current);
 			await this.#removeCompleteTrees(current.filter(entry => !this.#heldTree(entry.note)));
+			let sentNotes = false;
 			let windowIndex = 0, nextPrefetch = 0, ahead;
 			try { for (const entry of changes) {
+				if (!sentNotes && !targets && ceiling === undefined && this.direction !== 'receive' && this.remoteMode !== 'receive' &&
+					receivePlan.ranks.get(entry.note) === 2) {
+					// Publish local notes before starting the attachment receive phase.
+					// Unknown/structural metadata remains protected by the normal send guards.
+					const notes = (await this.host.list()).filter(path => isMarkdown(path) && !renameSources(path, this.renames).length);
+					if (notes.length) await this.#send(undefined, undefined, undefined, false, notes);
+					sentNotes = true;
+				}
 				if (!targets && ceiling === undefined) await this.#prioritizeContent();
 				const held = this.#heldTree(entry.note);
 				if (held && heads.get(entry.note) === entry) {
@@ -1148,7 +1227,8 @@ export class NotebookSynchronizer {
 				while (current[windowIndex] !== entry) windowIndex++;
 				if (windowIndex >= nextPrefetch) {
 					if (windowIndex > 0) await this.#contentPoll?.();
-					const windowEntries = current.slice(windowIndex, windowIndex + this.batchFiles);
+					const rank = receivePlan.ranks.get(entry.note);
+					const windowEntries = current.slice(windowIndex, windowIndex + this.batchFiles).filter(item => receivePlan.ranks.get(item.note) === rank);
 					if (!windowEntries.some(item => item.removed)) {
 						const matches = ahead?.index === windowIndex;
 						const pending = ahead ? await ahead.promise : undefined;
@@ -1160,7 +1240,7 @@ export class NotebookSynchronizer {
 						this.#windowManifests = window.manifests;
 						this.#prefetchedInfo = window.info;
 						nextPrefetch = windowIndex + window.covered;
-						const next = current.slice(nextPrefetch, nextPrefetch + this.batchFiles);
+						const next = current.slice(nextPrefetch, nextPrefetch + this.batchFiles).filter(item => receivePlan.ranks.get(item.note) === rank);
 						if (this.batchTransfer && next.length && !next.some(item => item.removed)) {
 							// One next window only; receive/write/checkpoint remain serial.
 							ahead = { index: nextPrefetch, promise: this.#prefetch(next, window.manifests)
@@ -1226,6 +1306,7 @@ export class NotebookSynchronizer {
 			!Object.keys(this.renames).length && cache?.state === this.state &&
 			cache.version === version && Date.now() >= cache.at && Date.now() - cache.at < 60000) return;
 		let files = (priorityPaths ?? await this.host.list()).filter(path => !this.#heldPath(path));
+		files.sort((a, b) => Number(isMarkdown(b)) - Number(isMarkdown(a)));
 		const listedFolders = (priorityPaths ? [] : ((await this.host.listFolders?.()) ?? [])).filter(
 			(path) => !this.excluded(path) && !this.#heldPath(path),
 		);
@@ -1384,7 +1465,12 @@ export class NotebookSynchronizer {
 		this.onProgress(t('sync.checked', { checked: 0, total: scanTotal }), { checked: 0, total: scanTotal });
 		let checked = 0,
 			lastYield = Date.now();
+		let sendingAttachments = false;
 		for (const raw of paths) {
+			if (!folderSet.has(raw) && !isMarkdown(raw) && !sendingAttachments) {
+				await flushUploads();
+				sendingAttachments = true;
+			}
 			if (!priorityPaths && !targets && ceiling === undefined && (this.contentPriorities.size || (checked > 0 && checked % this.batchFiles === 0 && this.#contentPoll))) {
 				// Finish an existing batch before sharing the normal send pipeline.
 				await flushUploads();
@@ -1587,7 +1673,7 @@ export class NotebookSynchronizer {
 			if (incrementalPlan) this.incrementalInventory.finish(incrementalPlan);
 			return;
 		}
-		if (!targets && ceiling === undefined) await this.#prioritizeContent();
+		if (!targets && ceiling === undefined) await this.#prioritizeContent(false);
 		const deletions = [];
 		for (const [id, previous] of Object.entries(this.state.notes)) {
 			if (targets && !targets.has(id)) continue;

@@ -22,9 +22,9 @@ export function validateEdition(config, selected) {
   for (const key of ['serviceOrigin', 'website', 'privacyUrl']) if (config[key] !== null) publicUrl(config[key], key === 'serviceOrigin');
   if (config.serviceOrigin !== null) assert.equal(config.serviceOrigin, selected === 'cn' ? 'https://sync.wujiesync.cc' : 'https://sync.smartsync.cc', 'Wrong regional service domain');
   if (config.stagingOrigin !== undefined) {
-    assert.equal(selected, 'cn', 'No Global staging authority is configured');
-    assert.equal(config.stagingOrigin, 'http://127.0.0.1:24819', 'Wrong fixed China staging tunnel');
+    assert.equal(config.stagingOrigin, selected === 'cn' ? 'http://127.0.0.1:24819' : 'https://staging-sync.smartsync.cc', 'Wrong regional staging service');
   }
+  for (const [key, expected] of Object.entries(selected === 'cn' ? { payOrigin: 'https://pay.wujiesync.cc', stagingPayOrigin: 'https://pay.wujiesync.cc' } : { payOrigin: 'https://pay.smartsync.cc', stagingPayOrigin: 'https://staging-pay.smartsync.cc' })) assert.equal(config[key], expected, 'Wrong regional payment service: ' + key);
   if (config.website !== null) assert.ok((selected === 'cn'
     ? ['https://wujiesync.cc', 'https://github.com/adventurer2008/obsidian-smart-sync-release-cn']
     : ['https://smartsync.cc']).includes(config.website), 'Wrong regional website');

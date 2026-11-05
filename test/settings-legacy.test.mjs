@@ -116,6 +116,45 @@ test('reusing the native LAN row replaces old details and displays only the curr
 	assert.equal(setting.settingEl.querySelectorAll('.smart-sync-lan-details').length, 0);
 });
 
+test('account danger controls survive repeated native renders once and clean up before row reuse', async t => {
+	const { tab, plugin } = fixture(t);
+	plugin.accountAuthorized = true;
+	let deletions = 0;
+	plugin.deleteAccount = () => { deletions++; };
+	const definition = tab.getSettingDefinitions().find(group => group.name === '账号').items.find(item => item.name === '危险操作');
+	const setting = new Setting(tab.containerEl);
+	const oldDispose = definition.render(setting);
+	const dispose = definition.render(setting); // Reproduce a host refresh that retains custom children.
+	oldDispose(); // A late cleanup must not hide/remove the new controls.
+	assert.equal(setting.settingEl.querySelectorAll('.smart-sync-account-danger').length, 1);
+	assert.equal(setting.settingEl.classList.contains('smart-sync-danger-row'), true);
+	assert.equal(deletions, 0);
+	await setting.settingEl.querySelector('.smart-sync-account-danger .setting-item').setting.controls[0].click();
+	assert.equal(deletions, 1);
+	dispose();
+	assert.equal(setting.settingEl.querySelectorAll('.smart-sync-account-danger').length, 0);
+	assert.equal(setting.settingEl.classList.contains('smart-sync-danger-row'), false);
+	plugin.accountAuthorized = false;
+	assert.equal(tab.getSettingDefinitions().some(group => group.name === '账号'), false);
+});
+
+test('native group reuse replaces the account heading with current preferences and keeps one wrapper', t => {
+	const { tab, plugin } = fixture(t);
+	const wrapper = tab.containerEl.createDiv(), listEl = wrapper.createDiv();
+	const setting = new Setting(listEl);
+	let dispose;
+	for (const connected of [true, false, true, false]) {
+		dispose?.();
+		plugin.accountAuthorized = connected;
+		const group = tab.getSettingDefinitions().find(group => group.name === (connected ? '账号' : '同步偏好'));
+		dispose = group.items[0].render(setting, { listEl });
+		assert.equal(wrapper.querySelectorAll('details.smart-sync-section').length, 1);
+		assert.equal(wrapper.querySelector('.smart-sync-section-title').textContent, group.name);
+		assert.equal(wrapper.querySelector('.smart-sync-section-description').textContent, connected ? '账号设置' : '自动同步、提醒、附件下载与局域网加速');
+	}
+	dispose();
+});
+
 test('legacy host renders all shared definitions offline, refreshes and releases listeners/timers', async t => {
 	const { tab, plugin, timers } = fixture(t);
 	let finishVersion;

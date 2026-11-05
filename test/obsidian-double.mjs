@@ -27,7 +27,10 @@ export class TFolder {
 }
 function element() {
 	const classes = new Set();
+	const attributes = new Map();
 	return {
+		setAttribute(name, value) { attributes.set(name, String(value)); },
+		getAttribute(name) { return attributes.get(name) ?? null; },
 		classList: {
 			add: (...names) => names.forEach(name => classes.add(name)),
 			remove: (...names) => names.forEach(name => classes.delete(name)),

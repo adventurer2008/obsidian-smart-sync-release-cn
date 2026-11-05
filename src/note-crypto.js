@@ -1,5 +1,6 @@
 import { base64, unbase64, hex } from './codec.js';
 import { compressBytes, decompressBytes } from './compatibility.js';
+import { t } from './i18n.js';
 
 // R270: a separate local encryption layer. No workspace/account secrets are used.
 export const NOTE_LIMIT = 2 * 1024 * 1024;
@@ -8,7 +9,7 @@ export const TEXT_PREFIX = '⟦wujie-lock:v1:';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const random = size => crypto.getRandomValues(new Uint8Array(size));
-const fault = () => Error('加密内容损坏、格式不支持或密码不正确。原文件未被解密覆盖。');
+const fault = () => Error(t('encryption.invalidContent'));
 const fields = ['v', 'kind', 'id', 'rounds', 'salt', 'hint', 'wrapIV', 'wrappedKey', 'iv', 'size', 'body'];
 const wrapAAD = box => encoder.encode(JSON.stringify(['wujie-note-wrap-1', box.kind, box.id, box.rounds, box.salt, box.hint]));
 const bodyAAD = box => encoder.encode(JSON.stringify(['wujie-note-body-1', box.kind, box.id, box.size, 'deflate']));
@@ -53,7 +54,7 @@ export function searchableText(text) {
 }
 function passwordBytes(password, creating = false) {
 	if (typeof password !== 'string' || password.length > 1024 || !password.length || creating && password.length < 4)
-		throw Error('加密密码至少4个字符，最多1024个字符；密码不会上传，也无法代找回。');
+		throw Error(t('encryption.invalidPassword'));
 	return encoder.encode(password);
 }
 async function wrappingKey(password, box, creating = false) {
@@ -78,7 +79,7 @@ async function wrap(raw, password, box) {
 export async function updateLocked(box, key, text) {
 	const clear = encoder.encode(text);
 	try {
-		if (clear.length > NOTE_LIMIT) throw Error('本次加密内容超过2 MB，请缩小范围；原笔记未改变。');
+		if (clear.length > NOTE_LIMIT) throw Error(t('encryption.contentTooLarge'));
 		const packed = await compressBytes(clear, NOTE_LIMIT + 65536);
 		try {
 			const next = { ...box, iv: base64(random(12)), size: clear.length };
@@ -124,9 +125,9 @@ export async function rewrapLocked(box, password, nextPassword, hint = '') {
 
 // The host's process() callback is atomic. Never replace a newer remote/local edit.
 export async function replaceLocked(vault, file, expected, replacement, mtime, guard = () => true) {
-	if (typeof vault.process !== 'function') throw Error('当前Obsidian不支持安全写入，请升级后重试。');
+	if (typeof vault.process !== 'function') throw Error(t('encryption.safeWriteUnavailable'));
 	return vault.process(file, current => {
-		if (!guard() || current !== expected) throw Error('笔记已更新或操作已结束，请重新打开后重试。');
+		if (!guard() || current !== expected) throw Error(t('encryption.writeContextChanged'));
 		return replacement;
 	}, mtime === undefined ? undefined : { mtime });
 }

@@ -7,6 +7,8 @@
   "channel": "brat",
   "serviceOrigin": "https://sync.wujiesync.cc",
   "stagingOrigin": "http://127.0.0.1:24819",
+  "payOrigin": "https://pay.wujiesync.cc",
+  "stagingPayOrigin": "https://pay.wujiesync.cc",
   "website": "https://github.com/adventurer2008/obsidian-smart-sync-release-cn",
   "privacyUrl": "https://github.com/adventurer2008/obsidian-smart-sync-release-cn/blob/main/PRIVACY.md",
   "mailFrom": "admin@wujiesync.cc",

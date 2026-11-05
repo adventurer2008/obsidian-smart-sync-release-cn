@@ -48,7 +48,8 @@ function fixture() {
 }
 
 for (const batch of [false,true]) test(`lost ${batch?'batch':'ordinary'} commit response recovers in send-only mode without duplicate upload; receiver preserves original times`, async () => {
- const f=fixture(); f.set('first.md','first private body'); if(batch)f.set('second.bin',new Uint8Array(300000).fill(91));
+ // Keep both files in the Markdown phase so the lost receipt still covers a genuine two-file batch.
+ const f=fixture(); f.set('first.md','first private body'); if(batch)f.set('second.md',new Uint8Array(300000).fill(91));
  const options={direction:'send',batchTransfer:batch,checkpointSize:100,checkpointInterval:5000};
  f.lose(); await assert.rejects(f.engine(options).run(),/response lost/);
  const before=f.counts(); assert.equal(f.durable().pendingCommit.phase,'prepared');

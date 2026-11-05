@@ -108,10 +108,22 @@ export function decodeObjectBatch(bytes) {
 	return objects;
 }
 export class ApiFault extends Error {
-	constructor(status) {
+	constructor(status, details = {}) {
 		super(`Synchronization service returned HTTP ${status}`);
 		this.status = status;
+		if ([409, 403].includes(status) && ['VAULT_LIMIT_REACHED', 'DEVICE_LIMIT_REACHED'].includes(details.code)) {
+			this.code = details.code;
+			if (Number.isSafeInteger(details.limit) && details.limit >= 0) this.limit = details.limit;
+		}
 	}
+}
+function apiErrorDetails(value) {
+	if (!value || typeof value !== 'object') return {};
+	const match = typeof value.error === 'string' && value.error.match(/^(?:Free|This plan) supports up to (\d+) (vaults|devices)\. (?:Remove an unused vault|Revoke an unused device) or upgrade your plan\.$/);
+	return {
+		code: match ? (match[2] === 'vaults' ? 'VAULT_LIMIT_REACHED' : 'DEVICE_LIMIT_REACHED') : value.code,
+		limit: match ? Number(match[1]) : value.limit,
+	};
 }
 export async function responseBytes(response, limit, onProgress = () => {}, signal) {
 	if (Number(response.headers.get('content-length') ?? 0) > limit) {
@@ -144,6 +156,13 @@ export async function responseBytes(response, limit, onProgress = () => {}, sign
 	return bytes;
 }
 export function failureMessage(error) {
+	if (['VAULT_LIMIT_REACHED', 'DEVICE_LIMIT_REACHED'].includes(error?.code)) {
+		const vault = error.code === 'VAULT_LIMIT_REACHED';
+		const maximum = Number.isSafeInteger(error.limit) && error.limit >= 0 ? ` (${error.limit})` : '';
+		return vault
+			? `Cloud vault limit reached${maximum}. Connect an existing vault, or back up and delete an unused cloud vault. You can also choose a plan with a higher limit.`
+			: `Device limit reached${maximum}. Revoke an unused device in device management, or choose a plan with a higher limit, then sign in again.`;
+	}
 	const messages = {
 		401: 'Access key is invalid or revoked. Sign in again.',
 		403: 'This device cannot perform this action.',
@@ -209,8 +228,13 @@ export class WorkspaceApi {
 				redirect: 'error',
 		}), signal, reply => reply.body?.cancel());
 		if (!response.ok) {
-			void response.body?.cancel().catch(() => {});
-			throw new ApiFault(response.status);
+			let details = {};
+			try {
+				const bytes = await responseBytes(response, 16 * 1024, () => {}, signal);
+				details = apiErrorDetails(JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(bytes)));
+			} catch { void response.body?.cancel().catch(() => {}); }
+			if (signal.aborted) throw signal.reason;
+			throw new ApiFault(response.status, details);
 		}
 		const isBinary = response.headers.get('content-type')?.startsWith('application/octet-stream'),
 			limit = isBinary ? (suffix.endsWith('/objects/read') ? BATCH_BYTES : 2 * 1024 * 1024) : 1024 * 1024;

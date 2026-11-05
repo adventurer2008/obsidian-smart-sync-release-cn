@@ -95,7 +95,7 @@ test('4096 synthetic small files cross many windows with serial writes, intact c
 test('a speculative authorization failure cannot apply or checkpoint the next window', async () => {
 	const f = await fixture(), loadBatch = f.api.loadBatch;
 	f.api.loadBatch = async (addresses, limit) => {
-		if (addresses.includes(f.packets[2].manifest)) throw Object.assign(Error('synthetic authorization fault'), { status: 403 });
+		if (addresses.includes(f.packets[2].objects.find(object => object.address !== f.packets[2].manifest).address)) throw Object.assign(Error('synthetic authorization fault'), { status: 403 });
 		return loadBatch(addresses, limit);
 	};
 	await assert.rejects(f.engine.run(), /authorization fault/);
@@ -112,7 +112,7 @@ test('2048 mixed-size notes and attachments preserve exact bytes, original mtime
 	let total = 0;
 	for (let i = 0; i < 2048; i++) {
 		const name = `${i}.${i % 2 ? 'bin' : 'md'}`, actual = f.files.get(name);
-		assert.equal(f.writes[i], name); assert.equal(actual.length, 1 + (i * 7919) % 32768);
+		assert.equal(f.writes[i % 2 ? 1024 + (i - 1) / 2 : i / 2], name); assert.equal(actual.length, 1 + (i * 7919) % 32768);
 		for (let j = 0; j < actual.length; j++) assert.equal(actual[j], (i + j * 31) % 251);
 		assert.equal(f.times.get(name), mtime); total += actual.length;
 	}

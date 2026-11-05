@@ -436,6 +436,8 @@
 .smart-sync-overview-card .smart-sync-lan-details > summary { justify-content:space-between; min-height:44px; gap:6px 12px; }
 .smart-sync-common.smart-sync-layout-root > .setting-item.smart-sync-billing { width:100%; margin:0 0 16px; padding:18px 20px; border:1px solid var(--background-modifier-border); border-radius:14px; background:var(--background-primary); }
 .is-mobile .smart-sync-overview-card .smart-sync-identity-row button { min-height:44px; }
+/* CHG-20261105-GLOBAL-ENGLISH-ACTION-WRAP: wrap enlarged labels even on hosts without container queries. */
+.smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-control button { white-space:normal; overflow-wrap:anywhere; height:auto; min-width:0; max-width:100%; }
 @container wujie (min-width:640px) {
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:0 1 180px; min-width:180px; }
 }
@@ -446,7 +448,6 @@
   .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-name { flex:0 0 auto; white-space:nowrap; }
   .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-description { flex:1 1 100%; order:1; margin:0; }
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) > .setting-item-control { flex:0 0 auto; margin-inline-start:auto; }
-  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-control button { white-space:nowrap; }
 }
 /* Keep whole device actions readable on very narrow foldable covers with enlarged text. */
 @container wujie (max-width:319px) {
@@ -531,4 +532,97 @@
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control { flex-wrap:wrap; }
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-manual-action > .setting-item-control > button.mod-cta { flex:1 0 auto; min-width:max-content; }
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row > .setting-item-control button { white-space:normal; overflow-wrap:anywhere; }
+}
+.smart-sync-dialog.smart-sync-auth {
+  width: 100%;
+  max-width: 360px;
+  margin-inline: auto;
+  padding: 8px 0 max(8px, env(safe-area-inset-bottom));
+  text-align: center;
+}
+.smart-sync-auth-mark {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 14px;
+  border-radius: 14px;
+  color: var(--interactive-accent);
+  background: var(--background-secondary);
+  font-size: 38px;
+  line-height: 1;
+}
+.smart-sync-auth-intro { margin: 0 0 24px; color: var(--text-muted); line-height: 1.5; }
+.smart-sync-auth .smart-sync-auth-method {
+  padding: 0;
+  margin: 0 0 10px;
+  border: 0;
+  display: block;
+}
+.smart-sync-auth-method > .setting-item-info { display: none; }
+.smart-sync-auth .smart-sync-auth-method > .setting-item-control { display: block; width: 100%; }
+.smart-sync-dialog.smart-sync-auth .smart-sync-auth-method button {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-height: 46px;
+  padding: 11px 42px;
+  border-radius: 8px;
+  font-size: var(--font-ui-medium);
+  font-weight: 500;
+  text-align: center;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: none;
+}
+.smart-sync-auth-icon {
+  position: absolute;
+  inset-inline-start: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 600;
+}
+.smart-sync-auth-icon svg { width: 18px; height: 18px; }
+.smart-sync-auth-divider { display: flex; align-items: center; gap: 12px; margin: 17px 0; color: var(--text-faint); font-size: var(--font-ui-small); }
+.smart-sync-auth-divider::before, .smart-sync-auth-divider::after { content: ''; height: 1px; flex: 1; background: var(--background-modifier-border); }
+.smart-sync-auth-status { margin: 16px 0 0; color: var(--text-muted); font-size: var(--font-ui-small); line-height: 1.6; overflow-wrap: anywhere; }
+.smart-sync-auth-status:empty { display: none; }
+.smart-sync-auth .smart-sync-auth-check .setting-item { justify-content: center; border: 0; padding: 8px 0 0; }
+.smart-sync-auth-check .setting-item-info { display: none; }
+.smart-sync-dialog.smart-sync-auth .smart-sync-auth-check button { min-height: 44px; border: 0; background: transparent; box-shadow: none; color: var(--text-accent); }
+.smart-sync-auth-help { margin: 22px 0 0; padding-top: 18px; border-top: 1px solid var(--background-modifier-border); color: var(--text-muted); font-size: var(--font-ui-small); line-height: 1.65; overflow-wrap: anywhere; }
+.smart-sync-auth-google { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M22.56%2012.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26%201.37-1.04%202.53-2.21%203.31v2.77h3.57c2.08-1.92%203.28-4.74%203.28-8.09z%22%20fill%3D%22%234285F4%22%2F%3E%3Cpath%20d%3D%22M12%2023c2.97%200%205.46-.98%207.28-2.66l-3.57-2.77c-.98.66-2.23%201.06-3.71%201.06-2.86%200-5.29-1.93-6.16-4.53H2.18v2.84C3.99%2020.53%207.7%2023%2012%2023z%22%20fill%3D%22%2334A853%22%2F%3E%3Cpath%20d%3D%22M5.84%2014.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43%208.55%201%2010.22%201%2012s.43%203.45%201.18%204.93l2.85-2.22.81-.62z%22%20fill%3D%22%23FBBC05%22%2F%3E%3Cpath%20d%3D%22M12%205.38c1.62%200%203.06.56%204.21%201.64l3.15-3.15C17.45%202.09%2014.97%201%2012%201%207.7%201%203.99%203.47%202.18%207.07l3.66%202.84c.87-2.6%203.3-4.53%206.16-4.53z%22%20fill%3D%22%23EA4335%22%2F%3E%3C%2Fsvg%3E"); background-size:contain; background-repeat:no-repeat; background-position:center; }
+.smart-sync-auth-github { background-color:currentColor; -webkit-mask:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2098%2096%22%3E%3Cpath%20d%3D%22M41.4395%2069.3848C28.8066%2067.8535%2019.9062%2058.7617%2019.9062%2046.9902C19.9062%2042.2051%2021.6289%2037.0371%2024.5%2033.5918C23.2559%2030.4336%2023.4473%2023.7344%2024.8828%2020.959C28.7109%2020.4805%2033.8789%2022.4902%2036.9414%2025.2656C40.5781%2024.1172%2044.4062%2023.543%2049.0957%2023.543C53.7852%2023.543%2057.6133%2024.1172%2061.0586%2025.1699C64.0254%2022.4902%2069.2891%2020.4805%2073.1172%2020.959C74.457%2023.543%2074.6484%2030.2422%2073.4043%2033.4961C76.4668%2037.1328%2078.0937%2042.0137%2078.0937%2046.9902C78.0937%2058.7617%2069.1934%2067.6621%2056.3691%2069.2891C59.623%2071.3945%2061.8242%2075.9883%2061.8242%2081.252L61.8242%2091.2051C61.8242%2094.0762%2064.2168%2095.7031%2067.0879%2094.5547C84.4102%2087.9512%2098%2070.6289%2098%2049.1914C98%2022.1074%2075.9883%206.69539e-07%2048.9043%204.309e-07C21.8203%201.92261e-07%20-1.9479e-07%2022.1074%20-4.3343e-07%2049.1914C-6.20631e-07%2070.4375%2013.4941%2088.0469%2031.6777%2094.6504C34.2617%2095.6074%2036.75%2093.8848%2036.75%2091.3008L36.75%2083.6445C35.4102%2084.2188%2033.6875%2084.6016%2032.1562%2084.6016C25.8398%2084.6016%2022.1074%2081.1563%2019.4277%2074.7441C18.375%2072.1602%2017.2266%2070.6289%2015.0254%2070.3418C13.877%2070.2461%2013.4941%2069.7676%2013.4941%2069.1934C13.4941%2068.0449%2015.4082%2067.1836%2017.3223%2067.1836C20.0977%2067.1836%2022.4902%2068.9063%2024.9785%2072.4473C26.8926%2075.2227%2028.9023%2076.4668%2031.2949%2076.4668C33.6875%2076.4668%2035.2187%2075.6055%2037.4199%2073.4043C39.0469%2071.7773%2040.291%2070.3418%2041.4395%2069.3848Z%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E") center / contain no-repeat; mask:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2098%2096%22%3E%3Cpath%20d%3D%22M41.4395%2069.3848C28.8066%2067.8535%2019.9062%2058.7617%2019.9062%2046.9902C19.9062%2042.2051%2021.6289%2037.0371%2024.5%2033.5918C23.2559%2030.4336%2023.4473%2023.7344%2024.8828%2020.959C28.7109%2020.4805%2033.8789%2022.4902%2036.9414%2025.2656C40.5781%2024.1172%2044.4062%2023.543%2049.0957%2023.543C53.7852%2023.543%2057.6133%2024.1172%2061.0586%2025.1699C64.0254%2022.4902%2069.2891%2020.4805%2073.1172%2020.959C74.457%2023.543%2074.6484%2030.2422%2073.4043%2033.4961C76.4668%2037.1328%2078.0937%2042.0137%2078.0937%2046.9902C78.0937%2058.7617%2069.1934%2067.6621%2056.3691%2069.2891C59.623%2071.3945%2061.8242%2075.9883%2061.8242%2081.252L61.8242%2091.2051C61.8242%2094.0762%2064.2168%2095.7031%2067.0879%2094.5547C84.4102%2087.9512%2098%2070.6289%2098%2049.1914C98%2022.1074%2075.9883%206.69539e-07%2048.9043%204.309e-07C21.8203%201.92261e-07%20-1.9479e-07%2022.1074%20-4.3343e-07%2049.1914C-6.20631e-07%2070.4375%2013.4941%2088.0469%2031.6777%2094.6504C34.2617%2095.6074%2036.75%2093.8848%2036.75%2091.3008L36.75%2083.6445C35.4102%2084.2188%2033.6875%2084.6016%2032.1562%2084.6016C25.8398%2084.6016%2022.1074%2081.1563%2019.4277%2074.7441C18.375%2072.1602%2017.2266%2070.6289%2015.0254%2070.3418C13.877%2070.2461%2013.4941%2069.7676%2013.4941%2069.1934C13.4941%2068.0449%2015.4082%2067.1836%2017.3223%2067.1836C20.0977%2067.1836%2022.4902%2068.9063%2024.9785%2072.4473C26.8926%2075.2227%2028.9023%2076.4668%2031.2949%2076.4668C33.6875%2076.4668%2035.2187%2075.6055%2037.4199%2073.4043C39.0469%2071.7773%2040.291%2070.3418%2041.4395%2069.3848Z%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E") center / contain no-repeat; }
+@container wujie (max-width:300px) { .smart-sync-auth .smart-sync-auth-method button { padding-inline:36px; font-size:13px; } }
+.smart-sync-auth-email .setting-item { display:flex; flex-direction:column; align-items:stretch; gap:8px; border:0; }
+.smart-sync-auth-email .setting-item-control { width:100%; justify-content:stretch; }
+.smart-sync-auth-email input { width:100%; min-width:0; min-height:44px; font-size:16px; }
+.smart-sync-auth-email button { width:100%; min-height:44px; white-space:normal; }
+.smart-sync-danger-row {
+ display: block;
+}
+.smart-sync-danger-row > .setting-item-info,
+.smart-sync-danger-row > .setting-item-control {
+ display: none;
+}
+.smart-sync-account-danger summary {
+ cursor: pointer;
+ min-height: 44px;
+ display: flex;
+ align-items: center;
+ color: var(--text-error);
+}
+.smart-sync-account-danger p {
+ overflow-wrap: anywhere;
+}
+.smart-sync-account-danger button {
+ min-height: 44px;
+ max-width: 100%;
+ white-space: normal;
 }

@@ -6,11 +6,14 @@
   "repository": "adventurer2008/obsidian-smart-sync-release-global",
   "channel": "community",
   "serviceOrigin": "https://sync.smartsync.cc",
+  "stagingOrigin": "https://staging-sync.smartsync.cc",
+  "payOrigin": "https://pay.smartsync.cc",
+  "stagingPayOrigin": "https://staging-pay.smartsync.cc",
   "website": "https://smartsync.cc",
-  "privacyUrl": null,
+  "privacyUrl": "https://smartsync.cc/privacy/",
   "mailFrom": "admin@smartsync.cc",
-  "mailProfile": "global-pending-smtp",
-  "smtpVerified": false,
-  "hostingRegion": null,
+  "mailProfile": "global-qq-smtp",
+  "smtpVerified": true,
+  "hostingRegion": "united-states",
   "hostingRegionCandidates": ["singapore", "united-states"]
 }

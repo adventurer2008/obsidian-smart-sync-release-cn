@@ -92,3 +92,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+## Authentication provider brand marks
+
+Google's G mark and GitHub's Invertocat identify the corresponding sign-in providers. These marks remain the trademarks of their respective owners and are not relicensed under this project's software license. Bundled vector geometry comes from Google's https://fonts.gstatic.com/s/i/productlogos/googleg/v6/24px.svg and GitHub's official https://brand.github.com/GitHub_Logos.zip (SVG/GitHub_Invertocat_Black.svg). No endorsement is implied.

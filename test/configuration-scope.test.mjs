@@ -243,7 +243,7 @@ test('Chinese product messages contain no English prose or confirmation words', 
 	for (const [key, value] of Object.entries(messages)) {
 		if (key === 'overview.spaceMiB') { assert.equal(value, '{value} MB'); continue; }
 		if (key === 'overview.spaceGiB') { assert.equal(value, '{value} GB'); continue; }
-		const text = value.replace(/\{[^}]+\}/g, '').replace(/Obsidian|Smart Sync/g, '').replace(/\b(?:KB|MB|GB|B)\b|\/s/g, '');
+		const text = value.replace(/\{[^}]+\}/g, '').replace(/Obsidian|Smart Sync|Google|GitHub|Markdown/g, '').replace(/\b(?:KB|MB|GB|B)\b|\/s/g, '');
 		assert.equal(/[A-Za-z]/.test(text), false, key + ': ' + value);
 	}
 });

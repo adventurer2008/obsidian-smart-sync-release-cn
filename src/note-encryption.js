@@ -1,13 +1,13 @@
 import { Modal, Menu, Notice, Platform, editorInfoField } from 'obsidian';
 import { StateField, EditorState } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType, ViewPlugin } from '@codemirror/view';
-import { formatStorageSize } from './i18n.js';
+import { formatStorageSize, t } from './i18n.js';
 import {
 	createLocked, openLocked, updateLocked, rewrapLocked, lockedMarker, lockedRanges,
 	decodeBox, encodeBox, replaceLocked, TEXT_PREFIX, containsLockedText, NOTE_LIMIT,
 } from './note-crypto.js';
 
-const failure = error => new Notice(error instanceof Error ? error.message : '加密操作失败，原文件未被解密覆盖。');
+const failure = error => new Notice(error instanceof Error ? error.message : t('encryption.text02'));
 const button = (area, text, callback) => {
 	const el = area.createEl('button', { text, attr: { type: 'button' } });
 	el.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); callback(); });
@@ -30,33 +30,33 @@ class PasswordWindow extends Modal {
 			const input = row.createEl('input', { type, attr: { 'aria-label': label, maxlength: String(max), autocomplete: type === 'password' ? 'off' : 'off', autocapitalize: 'off', spellcheck: 'false' } });
 			return input;
 		};
-		this.password = field(this.creating ? '密码（至少4个字符）' : '密码', 'password', 1024);
+		this.password = field(this.creating ? t('encryption.text03') : t('encryption.text04'), 'password', 1024);
 		if (this.creating) {
-			this.confirm = field('确认密码', 'password', 1024);
-			this.hint = field('密码提示（可选，未加密）', 'text', 200);
+			this.confirm = field(t('encryption.text05'), 'password', 1024);
+			this.hint = field(t('encryption.text06'), 'text', 200);
 			this.hint.value = this.box?.hint ?? '';
-			this.contentEl.createEl('p', { text: '密码不会上传，忘记后无法代找回。标题仍可见，引用的图片和附件不会自动加密。加密前的历史与备份可能仍保留原文。' });
+			this.contentEl.createEl('p', { text: t('encryption.text07') });
 		} else if (this.box?.hint) {
-			button(this.contentEl, '查看密码提示', () => {
+			button(this.contentEl, t('encryption.text08'), () => {
 				if (!this.hintShown) { this.hintShown = true; this.contentEl.createEl('p', { text: this.box.hint }); }
 			});
 		}
-		if (this.titleText === '永久解密') this.contentEl.createEl('p', { text: '永久解密后，原文将作为普通文字保存在本地，并随笔记同步。' });
+		if (this.titleText === t('encryption.text09')) this.contentEl.createEl('p', { text: t('encryption.text10') });
 		this.status = this.contentEl.createDiv({ attr: { role: 'status', 'aria-live': 'polite' } });
-		this.submitButton = button(this.contentEl, this.creating ? '加密' : this.titleText, () => { void this.run(); });
-		button(this.contentEl, '取消', () => this.close());
+		this.submitButton = button(this.contentEl, this.creating ? t('encryption.text11') : this.titleText, () => { void this.run(); });
+		button(this.contentEl, t('encryption.text12'), () => this.close());
 		this.password.focus();
 	}
 	async run() {
 		if (this.busy || this.closed) return;
-		if (this.creating && this.password.value !== this.confirm.value) { this.status.setText('两次输入的密码不一致。'); return; }
+		if (this.creating && this.password.value !== this.confirm.value) { this.status.setText(t('encryption.text13')); return; }
 		this.busy = true; this.submitButton.disabled = true;
 		const epoch = this.manager.epoch;
 		try {
 			await this.submit(this.password.value, this.hint?.value ?? '', () => !this.closed && this.manager.active(epoch));
 			if (!this.closed) this.close();
 		} catch (error) {
-			if (!this.closed) this.status.setText(error instanceof Error ? error.message : '操作失败，请重试。');
+			if (!this.closed) this.status.setText(error instanceof Error ? error.message : t('encryption.text14'));
 		} finally {
 			this.password.value = ''; if (this.confirm) this.confirm.value = '';
 			this.busy = false; this.submitButton.disabled = false;
@@ -75,12 +75,12 @@ class PasswordWindow extends Modal {
 class EncryptionActions extends Modal {
 	constructor(manager, actions) { super(manager.app); this.manager = manager; this.actions = actions; }
 	onOpen() {
-		this.setTitle('加密内容');
+		this.setTitle(t('encryption.text15'));
 		this.containerEl?.addClass('wujie-crypto-sheet-container');
 		this.modalEl?.addClass('wujie-crypto-sheet');
 		this.contentEl.addClass('wujie-crypto-sheet-actions');
 		for (const [title, , action] of this.actions) button(this.contentEl, title, () => { this.close(); action(); });
-		button(this.contentEl, '取消', () => this.close());
+		button(this.contentEl, t('encryption.text12'), () => this.close());
 	}
 	onClose() { this.contentEl.empty(); if (this.manager.actionMenu === this) this.manager.actionMenu = undefined; }
 }
@@ -95,20 +95,20 @@ export class NoteEncryption {
 	}
 	active(epoch) { return !this.stopped && epoch === this.epoch && !this.document?.hidden; }
 	async capture(file, editor) {
-		if (!fileIsNote(file)) throw Error('请先打开一篇Markdown笔记。');
+		if (!fileIsNote(file)) throw Error(t('encryption.text16'));
 		const leaves = this.app.workspace.getLeavesOfType('markdown').filter(leaf => leaf.view?.file === file);
 		const view = leaves.find(leaf => leaf.view.editor === editor)?.view ?? leaves[0]?.view;
 		const original = view?.editor?.getValue() ?? await this.app.vault.read(file);
 		let from = 0, to = original.length;
 		if (editor) {
 			from = editor.posToOffset(editor.getCursor('from')); to = editor.posToOffset(editor.getCursor('to'));
-			if (from === to) throw Error('请先选中要加密的文字。');
+			if (from === to) throw Error(t('encryption.text17'));
 		}
 		return { file, original, from, to, path: file.path };
 	}
 	async encryptSelection(editor, file = this.app.workspace.getActiveFile()) {
 		const snapshot = await this.capture(file, editor);
-		if (!editor) throw Error('请先在编辑模式选中文字，再执行加密所选文本。');
+		if (!editor) throw Error(t('encryption.text18'));
 		return this.encrypt(snapshot, 'text');
 	}
 	readingMenu(event) {
@@ -125,26 +125,26 @@ export class NoteEncryption {
 		if (!text.trim() || typeof original !== 'string') return;
 		event.preventDefault(); event.stopPropagation(); this.closeActions();
 		const menu = new Menu(); this.actionMenu = menu;
-		menu.addItem(item => item.setTitle('复制').setIcon('copy').onClick(() => {
+		menu.addItem(item => item.setTitle(t('encryption.text19')).setIcon('copy').onClick(() => {
 			this.closeActions();
 			const clipboard = this.document.defaultView.navigator.clipboard;
 			if (clipboard) void clipboard.writeText(text).catch(failure);
-			else new Notice('无法复制，请使用系统复制快捷键。');
+			else new Notice(t('encryption.text20'));
 		}));
-		menu.addItem(item => item.setTitle('加密所选文本').setIcon('lock').onClick(() => {
+		menu.addItem(item => item.setTitle(t('encryption.encryptSelection')).setIcon('lock').onClick(() => {
 			this.closeActions(); void this.encryptReadingSelection(leaf, text, original, file).catch(failure);
 		}));
 		menu.showAtPosition({ x: event.clientX, y: event.clientY }, this.document);
 	}
 	async encryptReadingSelection(leaf, text, original, file = leaf.view.file) {
-		if (leaf.view.file !== file) throw Error('笔记已切换，请重新选择后加密。');
+		if (leaf.view.file !== file) throw Error(t('encryption.text21'));
 		const snapshot = await this.capture(file);
-		if (snapshot.original !== original || !text) throw Error('笔记已修改，请重新选择后加密。');
+		if (snapshot.original !== original || !text) throw Error(t('encryption.text22'));
 		const from = original.indexOf(text);
 		if (from < 0 || original.indexOf(text, from + 1) >= 0) {
 			const state = leaf.getViewState();
 			await leaf.setViewState({ ...state, state: { ...state.state, mode: 'source' } });
-			new Notice('已切换到编辑模式。选区含格式或重复文字，请重新选中要加密的文字。');
+			new Notice(t('encryption.text23'));
 			return;
 		}
 		return this.encrypt({ ...snapshot, from, to: from + text.length }, 'text');
@@ -155,35 +155,35 @@ export class NoteEncryption {
 	encrypt(snapshot, kind) {
 		const { original, from, to } = snapshot;
 		const ranges = lockedRanges(original);
-		if (ranges.some(range => range.box?.kind === 'note')) throw Error('整篇笔记已经加密，请先解锁。');
-		if (kind === 'text' && ranges.some(range => range.from < to && range.to > from)) throw Error('选区包含加密块，请调整选区；已有加密块不能拆开或重复加密。');
-		new PasswordWindow(this, kind === 'note' ? '加密整篇笔记' : '加密所选文本', undefined, true, async (password, hint, active) => {
+		if (ranges.some(range => range.box?.kind === 'note')) throw Error(t('encryption.text24'));
+		if (kind === 'text' && ranges.some(range => range.from < to && range.to > from)) throw Error(t('encryption.text25'));
+		new PasswordWindow(this, kind === 'note' ? t('encryption.encryptNote') : t('encryption.encryptSelection'), undefined, true, async (password, hint, active) => {
 			const box = await createLocked(original.slice(from, to), password, hint, kind);
-			if (!active()) throw Error('操作已取消，请重新打开。');
+			if (!active()) throw Error(t('encryption.text26'));
 			const next = original.slice(0, from) + lockedMarker(box) + original.slice(to);
 			await this.convert(snapshot, next, active);
 		}).open();
 	}
 	async convert(snapshot, next, active) {
 		const { file, original, path } = snapshot;
-		if (this.busyFiles.has(file)) throw Error('该笔记正在写入，请稍后重试。');
+		if (this.busyFiles.has(file)) throw Error(t('encryption.text27'));
 		this.busyFiles.add(file);
 		const leaves = this.app.workspace.getLeavesOfType('markdown').filter(leaf => leaf.view?.file === file);
 		const states = leaves.map(leaf => ({ leaf, state: leaf.getViewState() }));
 		try {
-			if (!active() || file.path !== path) throw Error('操作已取消或笔记已移动，请重试。');
+			if (!active() || file.path !== path) throw Error(t('encryption.text28'));
 			// Save existing edits first, then retire every editor/undo history before the cipher write.
 			for (const { leaf } of states) {
-				if (leaf.view.editor?.getValue() !== original) throw Error('笔记已修改，请重新选择后加密。');
+				if (leaf.view.editor?.getValue() !== original) throw Error(t('encryption.text22'));
 				await leaf.view.save();
 			}
-			if (await this.app.vault.read(file) !== original) throw Error('笔记已更新，请重新打开后加密。');
+			if (await this.app.vault.read(file) !== original) throw Error(t('encryption.text29'));
 			const mtime = file.stat.mtime;
 			this.owner.cancelEditorSaves?.();
 			for (const { leaf } of states) await leaf.setViewState({ type: 'empty' });
 			await replaceLocked(this.app.vault, file, original, next, mtime, () => active() && file.path === path);
 			await this.forgetOldPlaintext(path);
-			new Notice('已加密，本地文件已保存密文。');
+			new Notice(t('encryption.text30'));
 		} finally {
 			try {
 				for (const { leaf, state } of states) {
@@ -205,7 +205,7 @@ export class NoteEncryption {
 		area.addClass('wujie-encrypted');
 		area.classList?.toggle('is-open', false); area.classList?.toggle('is-editing', false);
 		area.classList?.toggle('is-whole-note', box?.kind === 'note');
-		button(area, box?.kind === 'note' ? '🔒 此笔记已加密 · 解锁' : box ? '🔒 加密内容' : '🔒 加密内容损坏或格式不支持', () => {
+		button(area, box?.kind === 'note' ? t('encryption.text31') : box ? t('encryption.text32') : t('encryption.text33'), () => {
 			if (box) this.unlock(area, path, marker, box, parentSession);
 		});
 		if (box) {
@@ -215,7 +215,7 @@ export class NoteEncryption {
 				this.openActions(target, event);
 			};
 			const moreButton = button(area, '⋯', more); moreButton.addClass('wujie-crypto-more');
-			moreButton.setAttribute?.('aria-label', '加密内容操作'); area.oncontextmenu = more;
+			moreButton.setAttribute?.('aria-label', t('encryption.text34')); area.oncontextmenu = more;
 		}
 	}
 	openActions(session, event) {
@@ -223,9 +223,9 @@ export class NoteEncryption {
 		this.closeActions();
 		const unlocked = this.sessions.has(session) && !session.locked;
 		const actions = unlocked ? [
-			['编辑', 'pencil', () => this.editSession(session)], ['锁定', 'lock', () => this.lock(session)],
-		] : [['解锁', 'unlock', () => this.unlock(session.area, session.path, session.marker, session.box, session.parentSession)]];
-		actions.push(['修改密码', 'key-round', () => this.changePassword(session)], ['永久解密', 'unlock', () => this.permanent(session)]);
+			[t('encryption.text35'), 'pencil', () => this.editSession(session)], [t('encryption.text36'), 'lock', () => this.lock(session)],
+		] : [[t('encryption.text37'), 'unlock', () => this.unlock(session.area, session.path, session.marker, session.box, session.parentSession)]];
+		actions.push([t('encryption.text38'), 'key-round', () => this.changePassword(session)], [t('encryption.text09'), 'unlock', () => this.permanent(session)]);
 		if (Platform.isMobile) { const modal = new EncryptionActions(this, actions); this.actionMenu = modal; modal.open(); return; }
 		const menu = new Menu(); this.actionMenu = menu;
 		for (const [title, icon, action] of actions) menu.addItem(item => item.setTitle(title).setIcon(icon).onClick(() => { this.closeActions(); action(); }));
@@ -234,13 +234,13 @@ export class NoteEncryption {
 	}
 	closeActions() { const menu = this.actionMenu; this.actionMenu = undefined; if (menu?.hide) menu.hide(); else menu?.close(); }
 	unlock(area, path, marker, box, parentSession) {
-		new PasswordWindow(this, '解锁', box, false, async (password, _hint, active) => {
+		new PasswordWindow(this, t('encryption.text37'), box, false, async (password, _hint, active) => {
 			const opened = await openLocked(box, password);
 			if (!active() || !area.isConnected) return;
 			const file = this.app.vault.getAbstractFileByPath(path);
 			const source = parentSession ? parentSession.locked ? '' : parentSession.text : file ? await this.app.vault.read(file) : '';
 			const ranges = lockedRanges(source).filter(range => range.box?.id === box.id && encodeBox(range.box) === encodeBox(box));
-			if (ranges.length !== 1 || !active()) throw Error('笔记已更新或加密块重复，请重新打开后解锁。');
+			if (ranges.length !== 1 || !active()) throw Error(t('encryption.text39'));
 			const session = { area, path, parentSession, marker: ranges[0].marker, box, key: opened.key, text: opened.text, epoch: this.epoch, lastUse: Date.now(), version: 0, saved: 0 };
 			this.areas.set(area, session);
 			this.sessions.add(session);
@@ -253,7 +253,7 @@ export class NoteEncryption {
 		area.classList?.toggle('is-open', true); area.classList?.toggle('is-editing', false);
 		area.onpointerdown = () => { session.lastUse = Date.now(); };
 		area.onkeydown = () => { session.lastUse = Date.now(); };
-		const content = area.createSpan({ cls: 'wujie-decrypted-text', attr: { tabindex: '0', role: 'button', 'aria-label': '已解锁的加密内容，点击显示操作' } });
+		const content = area.createSpan({ cls: 'wujie-decrypted-text', attr: { tabindex: '0', role: 'button', 'aria-label': t('encryption.text40') } });
 		let offset = 0;
 		for (const range of lockedRanges(session.text)) {
 			content.createSpan({ text: session.text.slice(offset, range.from) });
@@ -267,7 +267,7 @@ export class NoteEncryption {
 			more(event);
 		});
 		content.addEventListener('keydown', event => { if (event.target === content && (event.key === 'Enter' || event.key === ' ')) more(event); });
-		const moreButton = button(area, '⋯', more); moreButton.addClass('wujie-crypto-more'); moreButton.setAttribute?.('aria-label', '加密内容操作');
+		const moreButton = button(area, '⋯', more); moreButton.addClass('wujie-crypto-more'); moreButton.setAttribute?.('aria-label', t('encryption.text34'));
 		area.oncontextmenu = more;
 	}
 	editSession(session) {
@@ -277,18 +277,18 @@ export class NoteEncryption {
 		session.lastUse = Date.now(); session.area.empty();
 		session.area.oncontextmenu = null;
 		session.area.classList?.toggle('is-editing', true);
-		session.area.createDiv({ text: '安全编辑：按Markdown源码编辑，自动加密保存；图片和附件不随正文加密。' });
-		const input = session.area.createEl('textarea', { cls: 'wujie-crypto-editor', attr: { 'aria-label': '编辑加密内容', maxlength: String(NOTE_LIMIT), spellcheck: 'false', autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off' } });
+		session.area.createDiv({ text: t('encryption.text41') });
+		const input = session.area.createEl('textarea', { cls: 'wujie-crypto-editor', attr: { 'aria-label': t('encryption.text42'), maxlength: String(NOTE_LIMIT), spellcheck: 'false', autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off' } });
 		input.value = session.text; session.input = input;
 		session.status = session.area.createDiv({ attr: { role: 'status', 'aria-live': 'polite' } });
 		input.addEventListener('input', () => {
 			if (session.locked) return;
-			if (new TextEncoder().encode(input.value).length > NOTE_LIMIT) { input.value = session.text; session.status.setText(`超过${formatStorageSize(NOTE_LIMIT)}，已保留修改前的内容，请缩小范围。`); return; }
+			if (new TextEncoder().encode(input.value).length > NOTE_LIMIT) { input.value = session.text; session.status.setText(t('encryption.editTooLarge', { limit: formatStorageSize(NOTE_LIMIT) })); return; }
 			session.text = input.value; session.version++; session.lastUse = Date.now();
-			session.status.setText('正在加密保存…'); this.queueSave(session);
+			session.status.setText(t('encryption.text43')); this.queueSave(session);
 		});
-		button(session.area, '完成', () => { void this.finishEditing(session); });
-		button(session.area, '锁定', () => this.lock(session));
+		button(session.area, t('encryption.text44'), () => { void this.finishEditing(session); });
+		button(session.area, t('encryption.text36'), () => this.lock(session));
 		input.focus();
 	}
 	async finishEditing(session) {
@@ -317,11 +317,11 @@ export class NoteEncryption {
 					session.pendingBox = undefined;
 					session.writingMarker = undefined;
 					await this.removeDraft(session.box.id);
-					if (!session.locked) session.status?.setText('已加密保存');
+					if (!session.locked) session.status?.setText(t('encryption.text45'));
 				} catch {
 					session.draft = nextBox;
-					if (!session.locked) session.status?.setText('原笔记保存失败；已保留加密草稿。可通过“恢复加密草稿”找回。');
-					else new Notice('原笔记保存失败；已保留加密草稿，请使用“恢复加密草稿”。');
+					if (!session.locked) session.status?.setText(t('encryption.text46'));
+					else new Notice(t('encryption.text47'));
 					break;
 				}
 			}
@@ -329,8 +329,8 @@ export class NoteEncryption {
 			// Never announce durability when the encrypted journal itself failed.
 			session.failed = true;
 			if (session.pendingBox) this.volatileDrafts.set(session.box.id, session.pendingBox);
-			if (!session.locked) session.status?.setText('保存失败，请保持此窗口并重试；尚未确认保存。');
-			new Notice('加密内容尚未保存成功，请重试；未保存的最后修改可能丢失。');
+			if (!session.locked) session.status?.setText(t('encryption.text48'));
+			new Notice(t('encryption.text49'));
 		}).finally(() => {
 			session.work = undefined;
 			if (session.locked && !session.closing && (!session.failed || session.pendingBox)) { session.text = ''; session.key = undefined; }
@@ -343,30 +343,30 @@ export class NoteEncryption {
 	async replaceMarker(session, next, preserveTime, active = () => true) {
 		if (session.parentSession) {
 			const parent = session.parentSession;
-			if (!active() || !parent.key) throw Error('外层笔记已锁定，请重新解锁。');
+			if (!active() || !parent.key) throw Error(t('encryption.text50'));
 			const matches = lockedRanges(parent.text).filter(range => range.marker === session.marker);
-			if (matches.length !== 1) throw Error('外层笔记已修改，请恢复加密草稿。');
+			if (matches.length !== 1) throw Error(t('encryption.text51'));
 			const [range] = matches;
 			parent.text = parent.text.slice(0, range.from) + next + parent.text.slice(range.to); parent.version++;
 			parent.preserveTime = preserveTime && parent.saved === parent.version - 1;
 			await this.queueSave(parent);
-			if (parent.saved !== parent.version) throw Error('外层笔记尚未保存，请恢复加密草稿。');
+			if (parent.saved !== parent.version) throw Error(t('encryption.text52'));
 			return parent.text;
 		}
 		const file = this.app.vault.getAbstractFileByPath(session.path);
-		if (!fileIsNote(file)) throw Error('笔记已移动或删除。');
-		if (this.busyFiles.has(file)) throw Error('笔记正在转换，请重试。');
+		if (!fileIsNote(file)) throw Error(t('encryption.text53'));
+		if (this.busyFiles.has(file)) throw Error(t('encryption.text54'));
 		const prior = this.locks.get(file) ?? Promise.resolve();
 		const write = prior.catch(() => {}).then(async () => {
-			if (!active()) throw Error('操作已取消。');
+			if (!active()) throw Error(t('encryption.text55'));
 			const current = await this.app.vault.read(file);
 			const ranges = lockedRanges(current).filter(range => range.marker === session.marker);
-			if (ranges.length !== 1) throw Error('加密块已变更或重复，已保留双方内容，请重新打开。');
+			if (ranges.length !== 1) throw Error(t('encryption.text56'));
 			const range = ranges[0];
 			const nextText = current.slice(0, range.from) + next + current.slice(range.to);
 			// An editor containing newer unsaved surrounding text must not be overwritten.
 			for (const leaf of this.app.workspace.getLeavesOfType('markdown'))
-				if (leaf.view?.file === file && leaf.view.editor?.getValue() !== current) throw Error('笔记有未保存的修改，请先保存后重试。');
+				if (leaf.view?.file === file && leaf.view.editor?.getValue() !== current) throw Error(t('encryption.text57'));
 			await replaceLocked(this.app.vault, file, current, nextText, preserveTime ? file.stat.mtime : undefined, active);
 			return nextText;
 		});
@@ -374,15 +374,15 @@ export class NoteEncryption {
 		try { return await write; } finally { if (this.locks.get(file) === write) this.locks.delete(file); }
 	}
 	changePassword(session) {
-		new PasswordWindow(this, '验证原密码', session.box, false, async (password, _hint, active) => {
+		new PasswordWindow(this, t('encryption.text58'), session.box, false, async (password, _hint, active) => {
 			await this.flushChildren(session);
 			await this.queueSave(session);
-			if (session.saved !== session.version) throw Error('请先保存或恢复加密草稿。');
+			if (session.saved !== session.version) throw Error(t('encryption.text59'));
 			await openLocked(session.box, password);
 			if (!active()) return;
 			// Keep only a temporary non-extractable wrapping operation, never a saved password.
 			const oldPassword = password;
-			new PasswordWindow(this, '设置新密码', session.box, true, async (nextPassword, hint, nextActive) => {
+			new PasswordWindow(this, t('encryption.text60'), session.box, true, async (nextPassword, hint, nextActive) => {
 				const next = await rewrapLocked(session.box, oldPassword, nextPassword, hint);
 				if (!nextActive()) return;
 				await this.replaceMarker(session, lockedMarker(next), true, nextActive);
@@ -392,10 +392,10 @@ export class NoteEncryption {
 		}).open();
 	}
 	permanent(session) {
-		new PasswordWindow(this, '永久解密', session.box, false, async (password, _hint, active) => {
+		new PasswordWindow(this, t('encryption.text09'), session.box, false, async (password, _hint, active) => {
 			await this.flushChildren(session);
 			await this.queueSave(session);
-			if (session.saved !== session.version) throw Error('请先保存或恢复加密草稿。');
+			if (session.saved !== session.version) throw Error(t('encryption.text59'));
 			const { text } = await openLocked(session.box, password);
 			if (!active()) return;
 			const saved = await this.replaceMarker(session, text, true, active);
@@ -405,7 +405,7 @@ export class NoteEncryption {
 			}
 			this.clearSession(session);
 			if (session.parentSession && !session.parentSession.locked) session.area.createSpan({ text });
-			new Notice('已永久解密，原文现在作为普通文字保存。');
+			new Notice(t('encryption.text61'));
 		}).open();
 	}
 	clearSession(session, retaining = false) {
@@ -425,7 +425,7 @@ export class NoteEncryption {
 	async flushChildren(session) {
 		const children = [...this.sessions].filter(child => child.parentSession === session);
 		await Promise.all(children.map(child => this.lock(child)));
-		if (children.some(child => child.saved !== child.version)) throw Error('内层内容尚未保存，请先恢复加密草稿。');
+		if (children.some(child => child.saved !== child.version)) throw Error(t('encryption.text62'));
 	}
 	lock(session) {
 		if (session.locked) return session.lockWork;
@@ -460,7 +460,7 @@ export class NoteEncryption {
 	}
 	async writeDraft(session, box) {
 		const adapter = this.app.vault.adapter;
-		if (!adapter || typeof adapter.write !== 'function') throw Error('无法保存加密草稿。');
+		if (!adapter || typeof adapter.write !== 'function') throw Error(t('encryption.text63'));
 		let parent = '';
 		for (const part of this.recoveryDir.split('/')) {
 			parent = parent ? parent + '/' + part : part;
@@ -476,37 +476,37 @@ export class NoteEncryption {
 	async recoverDrafts() {
 		const adapter = this.app.vault.adapter;
 		const files = adapter && await adapter.exists(this.recoveryDir) ? (await adapter.list(this.recoveryDir)).files : [];
-		if (!files.length && !this.volatileDrafts.size) { new Notice('没有待恢复的加密草稿。'); return; }
-		const modal = new Modal(this.app); modal.setTitle('恢复加密草稿');
-		modal.contentEl.createEl('p', { text: '恢复为独立加密笔记，不覆盖原文件；使用原密码解锁。' });
-		for (const [id, box] of this.volatileDrafts) button(modal.contentEl, '恢复本次会话的加密草稿', () => { void (async () => {
-			const file = await this.app.vault.create(`恢复的加密笔记-${id}-${Date.now()}.md`, lockedMarker(box));
+		if (!files.length && !this.volatileDrafts.size) { new Notice(t('encryption.text64')); return; }
+		const modal = new Modal(this.app); modal.setTitle(t('encryption.text65'));
+		modal.contentEl.createEl('p', { text: t('encryption.text66') });
+		for (const [id, box] of this.volatileDrafts) button(modal.contentEl, t('encryption.text67'), () => { void (async () => {
+			const file = await this.app.vault.create(`${t('encryption.recoveredName')}-${id}-${Date.now()}.md`, lockedMarker(box));
 			this.volatileDrafts.delete(id); await this.app.workspace.getLeaf(false).openFile(file); modal.close();
 		})().catch(failure); });
 		for (const path of files) {
 			if (!/^([a-f0-9]{32})\.json$/u.test(path.slice(this.recoveryDir.length + 1)) || !path.startsWith(this.recoveryDir + '/')) continue;
 			const row = modal.contentEl.createDiv();
-			button(row, '恢复一份加密草稿', () => { void (async () => {
+			button(row, t('encryption.text68'), () => { void (async () => {
 				const raw = await adapter.read(path);
-				if (raw.length > 5 * 1024 * 1024) throw Error('草稿格式不支持。');
+				if (raw.length > 5 * 1024 * 1024) throw Error(t('encryption.text69'));
 				const entry = JSON.parse(raw), box = decodeBox(encodeBox(entry.box));
-				if (entry.format !== 1) throw Error('草稿格式不支持。');
-				const file = await this.app.vault.create(`恢复的加密笔记-${box.id}-${Date.now()}.md`, lockedMarker(box));
+				if (entry.format !== 1) throw Error(t('encryption.text69'));
+				const file = await this.app.vault.create(`${t('encryption.recoveredName')}-${box.id}-${Date.now()}.md`, lockedMarker(box));
 				await adapter.remove(path); await this.app.workspace.getLeaf(false).openFile(file); modal.close();
 			})().catch(failure); });
 		}
 		modal.open();
 	}
 	settings() {
-		const modal = new Modal(this.app); modal.setTitle('笔记加密设置');
-		const row = modal.contentEl.createEl('label', { text: '闲置后自动锁定 ' });
-		const select = row.createEl('select', { attr: { 'aria-label': '闲置后自动锁定' } });
-		for (const [value, text] of [[1, '1分钟'], [5, '5分钟'], [15, '15分钟'], [0, '不按闲置时间锁定']]) select.createEl('option', { text, value: String(value) });
+		const modal = new Modal(this.app); modal.setTitle(t('encryption.text70'));
+		const row = modal.contentEl.createEl('label', { text: t('encryption.text71') });
+		const select = row.createEl('select', { attr: { 'aria-label': t('encryption.text72') } });
+		for (const [value, text] of [[1, t('encryption.text73')], [5, t('encryption.text74')], [15, t('encryption.text75')], [0, t('encryption.text76')]]) select.createEl('option', { text, value: String(value) });
 		select.value = String(this.owner.data?.encryptionPreferences?.idleMinutes ?? 5);
-		modal.contentEl.createEl('p', { text: '关闭笔记、应用进入后台或退出笔记库仍会锁定。密码仅用于本次解锁，不写入设置。' });
-		button(modal.contentEl, '保存', () => { void (async () => {
+		modal.contentEl.createEl('p', { text: t('encryption.text77') });
+		button(modal.contentEl, t('encryption.text78'), () => { void (async () => {
 			const minutes = Number(select.value);
-			if (![0, 1, 5, 15].includes(minutes)) throw Error('请选择有效的锁定时间。');
+			if (![0, 1, 5, 15].includes(minutes)) throw Error(t('encryption.text79'));
 			this.owner.data.encryptionPreferences = { idleMinutes: minutes };
 			await this.owner.saveData(this.owner.data); modal.close();
 		})().catch(failure); });
@@ -569,7 +569,7 @@ export function encryptionExtension(manager) {
 			if (view.state.selection.main.empty || !info?.editor || !fileIsNote(info.file)) { toolbar?.remove(); toolbar = undefined; return; }
 			if (toolbar) return;
 			toolbar = view.dom.parentElement.createDiv({ cls: 'wujie-encryption-selection-tools' });
-			const action = button(toolbar, '加密所选文本', () => { void manager.encryptSelection(info.editor, info.file).catch(failure); });
+			const action = button(toolbar, t('encryption.encryptSelection'), () => { void manager.encryptSelection(info.editor, info.file).catch(failure); });
 			action.addEventListener('pointerdown', event => event.preventDefault());
 		};
 		update();
@@ -589,20 +589,20 @@ export function registerNoteEncryption(owner) {
 	owner.recoverEncryptedDrafts = () => manager.recoverDrafts().catch(failure);
 	owner.noteEncryptionSettings = () => manager.settings();
 	for (const [id, name, method] of [
-		['encrypt-selected-text', '加密所选文本', 'encryptSelectedText'],
-		['encrypt-whole-note', '加密整篇笔记', 'encryptWholeNote'],
-		['lock-encrypted-notes', '立即锁定全部加密内容', 'lockEncryptedNotes'],
-		['recover-encrypted-drafts', '恢复加密草稿', 'recoverEncryptedDrafts'],
-		['note-encryption-settings', '笔记加密设置', 'noteEncryptionSettings'],
+		['encrypt-selected-text', t('encryption.encryptSelection'), 'encryptSelectedText'],
+		['encrypt-whole-note', t('encryption.encryptNote'), 'encryptWholeNote'],
+		['lock-encrypted-notes', t('encryption.text80'), 'lockEncryptedNotes'],
+		['recover-encrypted-drafts', t('encryption.text65'), 'recoverEncryptedDrafts'],
+		['note-encryption-settings', t('encryption.text70'), 'noteEncryptionSettings'],
 	]) owner.addCommand({ id, name, callback: () => owner[method]() });
 	const workspace = owner.app.workspace;
 	if (workspace.on) {
 		owner.registerEvent(workspace.on('editor-menu', (menu, editor, info) => {
 			if (!editor.getSelection() || !fileIsNote(info.file)) return;
-			menu.addItem(item => item.setTitle('加密所选文本').setIcon('lock').onClick(() => { void manager.encryptSelection(editor, info.file).catch(failure); }));
+			menu.addItem(item => item.setTitle(t('encryption.encryptSelection')).setIcon('lock').onClick(() => { void manager.encryptSelection(editor, info.file).catch(failure); }));
 		}));
 		owner.registerEvent(workspace.on('file-menu', (menu, file) => {
-			if (fileIsNote(file)) menu.addItem(item => item.setTitle('加密整篇笔记').setIcon('lock').onClick(() => { void manager.encryptNote(file).catch(failure); }));
+			if (fileIsNote(file)) menu.addItem(item => item.setTitle(t('encryption.encryptNote')).setIcon('lock').onClick(() => { void manager.encryptNote(file).catch(failure); }));
 		}));
 		owner.registerEvent(workspace.on('layout-change', () => manager.sweep()));
 	}
