@@ -75,6 +75,22 @@ test('integrated overview preserves all identity and synchronization routes and 
 	for (const cleanup of cleanups) cleanup();
 });
 
+test('signed-in accounts without a vault offer device management and never request pairing themselves', async t => {
+	const { tab, plugin } = fixture(t), calls = [];
+	plugin.accountAuthorized = true;
+	plugin.devices = async () => calls.push('devices');
+	plugin.addDevice = async () => calls.push('addDevice');
+	plugin.pairThisDevice = () => assert.fail('A signed-in account is not an anonymous recipient');
+	const definition = tab.getSettingDefinitions().find(item => item.cls === 'smart-sync-overview-group').items.find(item => item.name === '同步设备');
+	const setting = new Setting(tab.containerEl);
+	const cleanup = definition.render(setting);
+	assert.match(setting.desc, /已登录账号.*管理笔记库.*六位码/);
+	assert.deepEqual(setting.controls.map(control => control.text), ['设备管理', '添加设备']);
+	for (const control of setting.controls) await control.click();
+	assert.deepEqual(calls, ['devices', 'addDevice']);
+	cleanup();
+});
+
 test('reusing the native device setting across refreshes keeps only one pairing instruction', t => {
 	const { tab, plugin } = fixture(t);
 	const setting = new Setting(tab.containerEl);

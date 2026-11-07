@@ -11,6 +11,36 @@ const {billingCard,capacityWarning}=await import('../src/billing.js');
 const {default:Plugin}=await import('../src/plugin.js');
 const {modals,Modal,Platform}=await import('./obsidian-double.mjs');
 
+test('Global device addition distinguishes account-only, connected and signed-out devices',async()=>{
+ const calls=[];
+ const plugin={app:{},data:{settings:{workspace:''}},accountAuthorized:true,
+  manageNotebooks:async()=>calls.push('notebooks'),approveDevice:async()=>calls.push('approve'),pairThisDevice:async()=>calls.push('pair')};
+ let dialog=await Plugin.prototype.addDevice.call(plugin);
+ assert.equal(dialog.contentEl.children[0].text,t('overview.pairSelectNotebook'));
+ assert.equal(dialog.contentEl.settings[0].controls[0].text,'Manage notebooks');
+ await dialog.contentEl.settings[0].controls[0].click();
+ assert.deepEqual(calls,['notebooks']);
+ plugin.data.settings.workspace='synthetic-vault';
+ dialog=await Plugin.prototype.addDevice.call(plugin);
+ assert.equal(dialog.contentEl.settings[0].controls[0].text,'Approve a new device');
+ await dialog.contentEl.settings[0].controls[0].click();
+ plugin.data.settings.workspace='';plugin.accountAuthorized=false;
+ dialog=await Plugin.prototype.addDevice.call(plugin);
+ assert.equal(dialog.contentEl.settings[0].controls[0].text,'Pair this device');
+ await dialog.contentEl.settings[0].controls[0].click();
+ assert.deepEqual(calls,['notebooks','approve','pair']);
+});
+
+test('English plan cards hide closed orders and retain active plan details',()=>{
+ const now=Date.UTC(2026,10,6);
+ const account={entitlement:{paid:true,plan:'global-5gb-year',logical:5*1024**3,ends:Date.UTC(2027,9,25)},usage:{logicalBytes:3.9*1024**3}};
+ const expected=billingCard(account,true,now);
+ const actual=billingCard({...account,currentOrder:{id:'synthetic-closed',status:'expired',title:'5 GB'}},true,now);
+ assert.equal(actual.order,'');assert.equal(actual.resume,undefined);
+ assert.equal(actual.title,'Current plan: 5 GB · Yearly');assert.equal(actual.badge,'Active');
+ for(const key of ['title','usage','expires','help','badge','prominent']) assert.equal(actual[key],expected[key]);
+});
+
 test('Global mobile storage upgrade presents an English fallback when direct browser opening fails',async()=>{
  const previousOpen=window.open;Platform.isMobile=true;window.open=()=>{throw Error('Synthetic browser block');};
  const plugin={app:{},data:{localId:'mobile-global',settings:{origin:'https://sync.smartsync.cc'}},secret:()=> 'synthetic-account',
@@ -19,7 +49,7 @@ test('Global mobile storage upgrade presents an English fallback when direct bro
   await Plugin.prototype.openBilling.call(plugin);
   const dialog=modals.at(-1),link=dialog.contentEl.children.find(child=>child.tag==='a');
   assert.equal(dialog.title,'My plan');assert.equal(link.text,'Open plans in browser');
-  assert.equal(link.href,'https://pay.smartsync.cc/pay/plans#ticket='+'a'.repeat(43));dialog.close();
+  assert.equal(link.href,'https://pay.smartsync.cc/pay/plans#ticket='+'a'.repeat(43)+'&lang=en');dialog.close();
  }finally{Platform.isMobile=false;window.open=previousOpen;}
 });
 
@@ -33,10 +63,10 @@ test('prepared mobile billing opens in the original click stack with no modal an
  const modalsBefore=modals.length;
  await Plugin.prototype.openBilling.call(plugin,undefined,true);await Plugin.prototype.openBilling.call(plugin,undefined,true);
  assert.equal(entries,1);assert.equal(opened.length,0);assert.equal(modals.length,modalsBefore);
- const first=Plugin.prototype.openBilling.call(plugin);assert.equal(opened.length,1,'must open before another await/network request');await first;assert.equal(entries,1);assert.match(opened[0][0],/#ticket=a+$/);
+ const first=Plugin.prototype.openBilling.call(plugin);assert.equal(opened.length,1,'must open before another await/network request');await first;assert.equal(entries,1);assert.match(opened[0][0],/#ticket=a+&lang=en$/);
  plugin.billingHandoffCancel();
- await Plugin.prototype.openBilling.call(plugin,undefined,true);account='synthetic-two';await Plugin.prototype.openBilling.call(plugin);assert.equal(entries,3);assert.match(opened[1][0],/#ticket=c+$/);plugin.billingHandoffCancel();
- await Plugin.prototype.openBilling.call(plugin,undefined,true);at+=90001;await Plugin.prototype.openBilling.call(plugin);assert.equal(entries,5);assert.match(opened[2][0],/#ticket=e+$/);plugin.billingHandoffCancel();
+ await Plugin.prototype.openBilling.call(plugin,undefined,true);account='synthetic-two';await Plugin.prototype.openBilling.call(plugin);assert.equal(entries,3);assert.match(opened[1][0],/#ticket=c+&lang=en$/);plugin.billingHandoffCancel();
+ await Plugin.prototype.openBilling.call(plugin,undefined,true);at+=90001;await Plugin.prototype.openBilling.call(plugin);assert.equal(entries,5);assert.match(opened[2][0],/#ticket=e+&lang=en$/);plugin.billingHandoffCancel();
  assert.equal(modals.length,modalsBefore);assert.equal(timers.size,0);
 });
 
@@ -77,13 +107,15 @@ test('Global encryption menus and password dialog use English without changing c
 });
 
 test('Global deletion blocks for cloud vaults and never posts until exact confirmation',async()=>{
- const calls=[];let status={vaults:1,pending:0,requiresReauthentication:false},signedOut=0;
- const plugin={app:{},data:{localId:'delete-fixture',settings:{origin:'https://sync.smartsync.cc'}},secret:()=> 'account-key',stopped:false,
+ const calls=[];let status={vaults:1,pending:0,requiresReauthentication:false},signedOut=0,managed=0;
+ const plugin={app:{},data:{localId:'delete-fixture',settings:{origin:'https://sync.smartsync.cc',workspace:''}},secret:()=> 'account-key',stopped:false,
   accountApi:async()=>({request:async(method,path,input)=>{calls.push({method,path,input});return method==='GET'?status:{erased:true};}}),
-  exclusive:async work=>work(),signOut:async()=>{signedOut++;},notify(){},manageNotebooks:async()=>{}};
+  exclusive:async work=>work(),signOut:async()=>{signedOut++;},notify(){},manageNotebooks:async()=>{managed++;},connectWorkspace:()=>assert.fail('Deletion must not connect a local vault')};
  await Plugin.prototype.deleteGlobalAccount.call(plugin);
  assert.equal(modals.at(-1).contentEl.settings[0].controls[0].text,'Manage cloud vaults');
  assert.equal(calls.some(call=>call.method==='POST'),false);
+ await modals.at(-1).contentEl.settings[0].controls[0].click();
+ assert.equal(managed,1);assert.equal(plugin.data.settings.workspace,'');
  status={vaults:0,pending:0,requiresReauthentication:true};
  await Plugin.prototype.deleteGlobalAccount.call(plugin);
 	assert.equal(modals.at(-1).contentEl.settings[0].controls[0].text,'Verify identity to continue');
@@ -160,7 +192,7 @@ test('Global reuses the plan card and account-bound entry with its own currency,
  assert.match(capacityWarning({...data,usage:{logicalBytes:6*1024**3}}).action,/storage/);
  const opened=[];window.open=(...args)=>opened.push(args);
  const plugin={data:{localId:'synthetic',settings:{origin:'https://sync.smartsync.cc'}},secret:()=> 'synthetic-key',accountApi:async()=>({accessKey:'synthetic-key'}),billingApi:()=>({request:async()=>({url:'https://pay.smartsync.cc/pay/plans#ticket='+'a'.repeat(43)})})};
- await Plugin.prototype.openBilling.call(plugin);assert.equal(opened[0][0],'https://pay.smartsync.cc/pay/plans#ticket='+'a'.repeat(43));
+ await Plugin.prototype.openBilling.call(plugin);assert.equal(opened[0][0],'https://pay.smartsync.cc/pay/plans#ticket='+'a'.repeat(43)+'&lang=en');
  plugin.billingApi=()=>({request:async()=>({url:'https://pay.wujiesync.cc/pay/plans#ticket='+'a'.repeat(43)})});
  await assert.rejects(Plugin.prototype.openBilling.call(plugin),/Invalid purchase entry/);
 });
@@ -180,7 +212,7 @@ test('Global browser authentication sends only a PKCE challenge, confines the re
  }}),workspaceApi:(origin,access)=>{assert.equal(origin,'https://sync.smartsync.cc');assert.equal(access,key);return{request:async()=>({owner:'owner',email:'auth@example.invalid',scope:null,accountDevice:true,deviceId:device})};}};
  const flow=await Plugin.prototype.beginGlobalSignIn.call(plugin,'google');
  const expected=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(flow.verifier))).toString('base64url');
- assert.equal(sent.challenge,expected);assert.equal(sent.verifier,undefined);assert.equal(opened[0][0],'https://pay.smartsync.cc/auth/login#flow='+id+'&method=google');assert.ok(!opened[0][0].includes(flow.verifier));
+ assert.equal(sent.challenge,expected);assert.equal(sent.verifier,undefined);assert.equal(opened[0][0],'https://pay.smartsync.cc/auth/login#flow='+id+'&method=google&lang=en');assert.ok(!opened[0][0].includes(flow.verifier));
  await Plugin.prototype.finishGlobalSignIn.call(plugin,flow);
  assert.equal(refreshed,1);
  assert.equal(stored.get('smart-sync-global-isolated-auth-account'),key);assert.equal(stored.get('smart-sync-global-isolated-auth-oauth'),'');assert.equal(acked,true);

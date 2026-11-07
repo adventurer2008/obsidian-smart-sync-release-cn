@@ -1,7 +1,23 @@
 import { edition } from './edition.js';
-import { failureMessage as transportFailure } from './client.js';
+/* global __SMART_SYNC_GLOBAL_UI__ -- injected only by the regional build. */
+import { catalogs as allCatalogs } from './locales/catalogs.js';
+const catalogs = typeof __SMART_SYNC_GLOBAL_UI__ === 'undefined' || __SMART_SYNC_GLOBAL_UI__ ? allCatalogs : {};
 const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-export const locale = edition.locale;
+// Language is local presentation state; it never selects a service or account.
+export const supportedLanguages = Object.freeze({ en:'English', 'zh-CN':'简体中文', 'zh-TW':'繁體中文', ja:'日本語', ko:'한국어', de:'Deutsch', fr:'Français', es:'Español', 'pt-BR':'Português (Brasil)', ru:'Русский' });
+export function resolveLanguage(value) {
+ const tag = typeof value === 'string' ? value.replaceAll('_','-').toLowerCase() : '';
+ if (/^zh-(tw|hk|mo|hant)(-|$)/.test(tag)) return 'zh-TW';
+ if (tag === 'zh' || /^zh-(cn|sg|hans)(-|$)/.test(tag)) return 'zh-CN';
+ if (/^pt(-|$)/.test(tag)) return 'pt-BR';
+ const base = tag.split('-')[0];
+ return Object.hasOwn(supportedLanguages, base) ? base : 'en';
+}
+export let locale = edition.locale;
+export function configureLanguage(hostLanguage, preference = 'auto') {
+ locale = edition.edition === 'global' ? resolveLanguage(preference === 'auto' ? hostLanguage : preference) : edition.locale;
+ return locale;
+}
 const failures = {
 	CREATE_PENDING: '上次建库结果尚未确认。请用原库名重试，或先检查并连接已有云端库，不要反复新建。',
 	SYNC_BUSY: '当前正在同步。请等待本轮结束，或在“同步记录”中停止本轮后再操作。',
@@ -94,7 +110,10 @@ const localErrorCodes = new Map([
 ]);
 export function localizedFailure(error) {
 	if (['VAULT_LIMIT_REACHED', 'DEVICE_LIMIT_REACHED'].includes(error?.code)) {
-		if (locale === 'en') return transportFailure(error);
+		if (edition.edition === 'global') {
+ const limit = Number.isSafeInteger(error.limit) && error.limit >= 0 ? ` (${new Intl.NumberFormat(locale).format(error.limit)})` : '';
+ return t('error.' + error.code, { limit });
+ }
 		const maximum = Number.isSafeInteger(error.limit) && error.limit >= 0 ? `（${error.limit}）` : '';
 		return error.code === 'VAULT_LIMIT_REACHED'
 			? `云端笔记库数量已达套餐上限${maximum}。可以连接已有库，或备份后删除不用的云端库，也可以选择支持更多库的套餐。`
@@ -113,7 +132,7 @@ export function localizedFailure(error) {
 				: error instanceof TypeError || ['TimeoutError', 'AbortError'].includes(error?.name)
 					? 'network'
 					: 'generic';
-	return locale === 'en' ? englishEditionFailures[key] : failures[key];
+	return edition.edition === 'global' ? t('error.' + key) : failures[key];
 }
 const englishEditionFailures = {
 	CREATE_PENDING:'A previous vault creation is not confirmed. Retry with the same vault name, or check and connect the existing cloud vault before creating another.',
@@ -150,7 +169,7 @@ const englishEditionFailures = {
 	ACCOUNT_ENCRYPTION_CONFIRM:'Account encryption passwords do not match. Try again.',
 	ACCOUNT_ENCRYPTION_LOCKED:'Unlock account encryption first.',ACCOUNT_ENCRYPTION_SETUP:'Set up account encryption first.',
 	NOTEBOOK_NAME_CONFIRMATION:'Vault name does not match. Enter the complete name without a device name. Nothing was deleted.',
-	ACCOUNT_ERASE_CONFIRMATION:'Type “ERASE ACCOUNT” to confirm. The original login key will be revoked immediately.',
+	ACCOUNT_ERASE_CONFIRMATION:'Type DELETE in uppercase to confirm account deletion. The account has not been deleted.',
 	PAIRING_CODE_INVALID:'Enter the six-digit code shown on the new device, including any leading zero.',
 	PAIRING_UNAVAILABLE:'This code expired, was used, or belongs to another service. Request a new code on the new device.',
 	PAIRING_EXPIRED:'Pairing code expired. Request a new code and enter it on the connected device.',
@@ -463,6 +482,7 @@ export const messages = {
 		'更换笔记库前，请先在顶部退出当前账号，本机笔记会保留。创建笔记库需要使用账号登录密钥。',
 	'overview.approveHelp': '新设备获取六位码，本机点‘批准新设备’批准。',
 	'overview.pairHelp': '也可以由已经连接的设备批准，让这台设备加入同步。',
+	'overview.pairSelectNotebook': '已登录账号。请先在“管理笔记库”中连接要配对的云端库，再点“添加设备”输入新设备的六位码。连接后，本机笔记也可能上传，请确认选择正确。',
 	'overview.moreAccount': '更多账号操作',
 	'overview.moreAccountHelp': '注销账号并删除全部云端数据，原登录密钥将失效',
 	'overview.accountSearch': '已有账号登录、退出当前账号',
@@ -1029,6 +1049,7 @@ export const englishDraft = {
 		'Get a six-digit code on the new device, then approve it from this connected device.',
 	'overview.pairHelp':
 		'An already connected device can approve this device to join synchronization.',
+	'overview.pairSelectNotebook': 'You are signed in. First connect the intended cloud vault in Manage notebooks, then use Add a device to enter the new device’s six-digit code. Local notes may upload after connecting, so check your selection.',
 	'overview.moreAccount': 'More account actions',
 	'overview.moreAccountHelp':
 		'Delete the account and all cloud data; the original login key becomes invalid',
@@ -1627,7 +1648,23 @@ Object.assign(englishDraft, {
 });
 // Missing translations are a release blocker; physical-device acceptance is separate.
 export const missingEnglishKeys = Object.keys(messages).filter(key => !owns(englishDraft, key));
-export const t = createTranslator(locale, locale === 'en' ? englishDraft : messages, { fallback: locale === 'en' ? undefined : messages });
+Object.assign(englishDraft, Object.fromEntries(Object.entries(englishEditionFailures).map(([key,value]) => ['error.' + key,value])), {
+ 'error.VAULT_LIMIT_REACHED':'Cloud vault limit reached{limit}. Connect an existing vault, or back up and delete an unused cloud vault. You can also choose a plan with a higher limit.',
+ 'error.DEVICE_LIMIT_REACHED':'Device limit reached{limit}. Revoke an unused device in device management, or choose a plan with a higher limit, then sign in again.',
+ 'language.title':'Interface language', 'language.help':'Follow Obsidian or choose a language for this vault on this device. Reload the plugin or restart Obsidian after saving; do not interrupt an active sync.', 'language.auto':'Follow Obsidian', 'language.saved':'Language saved. Reload the plugin or restart Obsidian when synchronization has finished.'
+});
+export function t(key, params = {}) {
+ if (edition.edition !== 'global') return createTranslator(edition.locale, messages)(key,params);
+ return createTranslator(locale, locale === 'en' ? englishDraft : catalogs[locale] ?? {}, { fallback: englishDraft })(key,params);
+}
+export function translateEnglish(text, params = {}) {
+ if (typeof text !== 'string') return text;
+ const translated = edition.edition === 'global' && locale !== 'en' ? catalogs[locale]?.['literal:' + text] ?? text : text;
+ return translated.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => {
+  if (!owns(params,name)) throw new Error('Missing language parameter: ' + name);
+  return String(params[name]);
+ });
+}
 
 export function formatStorageSize(bytes) {
 	const absolute = Math.abs(bytes);

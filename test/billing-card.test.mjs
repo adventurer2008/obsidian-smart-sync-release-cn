@@ -6,9 +6,13 @@ import { billingCard, mountBillingCard, renewalReminderAt } from '../src/billing
 const at = Date.UTC(2026, 9, 22), gb = 1024 ** 3;
 const paid = ends => ({ everPurchased:true, entitlement:{paid:true,plan:'cn-5gb-year',logical:5*gb,ends}, usage:{logicalBytes:1.2*gb} });
 
-test('an operator-closed unpaid order is terminal and has no resume action',()=>{
- const card=billingCard({entitlement:{paid:false},currentOrder:{id:'synthetic-closed',status:'expired',purpose:'purchase',title:'5GB'}},true,at);
- assert.equal(card.order,'订单已关闭');assert.equal(card.resume,undefined);assert.doesNotMatch(card.order,/处理中|等待付款/);
+test('closed unpaid orders stay hidden without changing current plan rights or resume actions',()=>{
+ for (const account of [{entitlement:{paid:false}},paid(Date.UTC(2027,9,23))]) {
+  const expected=billingCard(account,true,at);
+  const card=billingCard({...account,currentOrder:{id:'synthetic-closed',status:'expired',purpose:'purchase',title:'5GB'}},true,at);
+  assert.equal(card.order,'');assert.equal(card.resume,undefined);
+  for (const key of ['title','badge','usage','expires','label','prominent']) assert.equal(card[key],expected[key]);
+ }
 });
 test('signing in remounts one free card and discards the old guest view and pending response', async () => {
  const dom = new JSDOM('<div id="setting"><div id="info"><span>我的套餐</span></div><div id="controls"></div></div>', {pretendToBeVisual:true}), doc = dom.window.document;
@@ -31,8 +35,9 @@ test('upgrading a free account replaces its card with only the current 5GB plan'
  const free={entitlement:{plan:'cn-free',paid:false,logical:100*1024**2,starts:at},usage:{logicalBytes:0}};
  const options={connected:true,live:()=>true,now:()=>at,target:dom.window,open:async()=>{},onError:e=>{throw e;}};
  const old=mountBillingCard(setting,{...options,load:async()=>free});await new Promise(resolve=>setImmediate(resolve));assert.match(doc.body.textContent,/免费 · 100MB/);
- const dispose=mountBillingCard({...setting},{...options,load:async()=>paid(Date.UTC(2027,9,23))});await new Promise(resolve=>setImmediate(resolve));old();
+ const dispose=mountBillingCard({...setting},{...options,load:async()=>({...paid(Date.UTC(2027,9,23)),currentOrder:{id:'synthetic-closed',status:'expired',title:'5GB'}})});await new Promise(resolve=>setImmediate(resolve));old();
  assert.equal(doc.querySelectorAll('.smart-sync-plan-title').length,1);assert.equal(doc.querySelector('.smart-sync-plan-title').textContent,'当期套餐：5GB 年付');assert.doesNotMatch(doc.body.textContent,/免费|100MB|开通日期|登录信息/);assert.match(doc.body.textContent,/到期时间/);assert.match(doc.body.textContent,/5 GB/);assert.equal(doc.querySelector('button').hidden,true);
+ assert.doesNotMatch(doc.body.textContent,/订单已关闭/);assert.equal(doc.querySelector('[aria-live="polite"]').hidden,true);
  dispose();dom.window.close();
 });
 test('purchase and renewal states use one calendar month, including short months and expired plans', () => {
@@ -89,6 +94,21 @@ test('renewal action is hidden for a healthy plan and uses the purchase CTA with
     }
 });
 
+
+test('plan refresh failures stay visible after an empty order status and recover on focus',async()=>{
+ const dom=new JSDOM('<div id="setting"><div id="info"></div><div id="controls"></div></div>',{pretendToBeVisual:true}),doc=dom.window.document;
+ const setting={settingEl:doc.querySelector('#setting'),infoEl:doc.querySelector('#info'),controlEl:doc.querySelector('#controls'),setName(){}};
+ let failed=false;
+ const dispose=mountBillingCard(setting,{connected:true,live:()=>true,now:()=>at,target:dom.window,load:async()=>{if(failed)throw Error('offline');return paid(Date.UTC(2027,0,1));},open:async()=>{},onError:error=>{throw error;}});
+ try{
+  await new Promise(done=>setImmediate(done));
+  const status=doc.querySelector('[aria-live="polite"]');assert.equal(status.hidden,true);
+  failed=true;dom.window.dispatchEvent(new dom.window.Event('focus'));await new Promise(done=>setImmediate(done));
+  assert.equal(status.hidden,false);assert.match(status.textContent,/套餐信息暂时无法更新/);
+  failed=false;dom.window.dispatchEvent(new dom.window.Event('focus'));await new Promise(done=>setImmediate(done));
+  assert.equal(status.hidden,true);assert.equal(status.textContent,'');
+ }finally{dispose();dom.window.close();}
+});
 
 test('current and scheduled packages are distinct in the account card',()=>{
     const value=paid(Date.UTC(2028,9,22));value.entitlement.upcoming={plan:'cn-20gb-year',starts:Date.UTC(2027,9,22)};

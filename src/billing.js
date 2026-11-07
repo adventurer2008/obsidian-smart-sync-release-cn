@@ -1,4 +1,5 @@
-import { formatStorageSize, locale } from './i18n.js';
+import { edition } from './edition.js';
+import { formatStorageSize, locale, translateEnglish } from './i18n.js';
 
 const pending = new Set(['creating', 'pending', 'uncertain']);
 const mountedCards = new WeakMap();
@@ -22,11 +23,11 @@ export function launchBillingBrowser(view,href,{live,fallback,delay=1500}) {
 	if(!done)timer=view.setTimeout(recover,delay);
 	return cleanup;
 }
-const statuses = locale === 'en' ? {creating:'Creating order',pending:'Awaiting payment',expired:'Order closed',uncertain:'Verifying payment; do not pay again',paid:'Payment successful',rejected:'Payment order failed',refund_pending:'Refund pending',refunded:'Refunded'} : { creating: '正在生成订单', pending: '等待付款', expired: '订单已关闭', uncertain: '正在核实付款结果，请勿重复付款', paid: '付款成功', rejected: '支付订单创建失败', refund_pending: '退款处理中', refunded: '已退款' };
+const statuses = edition.edition === 'global' ? {creating:translateEnglish("Creating order"),pending:translateEnglish("Awaiting payment"),expired:translateEnglish("Order closed"),uncertain:translateEnglish("Verifying payment; do not pay again"),paid:translateEnglish("Payment successful"),rejected:translateEnglish("Payment order failed"),refund_pending:translateEnglish("Refund pending"),refunded:translateEnglish("Refunded")} : { creating: '正在生成订单', pending: '等待付款', expired: '订单已关闭', uncertain: '正在核实付款结果，请勿重复付款', paid: '付款成功', rejected: '支付订单创建失败', refund_pending: '退款处理中', refunded: '已退款' };
 export function capacityWarning(data) {
 	const used = data?.usage?.logicalBytes, capacity = data?.entitlement?.logical;
 	if (!Number.isSafeInteger(used) || !Number.isSafeInteger(capacity) || capacity < 0 || used <= capacity) return undefined;
-	return locale === 'en' ? {title:'Plan capacity exceeded',message:`Used ${formatStorageSize(used)} / ${formatStorageSize(capacity)}. Increase capacity to continue uploading.`,action:'Get more storage'} : { title: '套餐容量不足', message: `已用 ${formatStorageSize(used)} / ${formatStorageSize(capacity)}，请增加额度后继续上传。`, action: '购买更多额度' };
+	return edition.edition === 'global' ? {title:translateEnglish("Plan capacity exceeded"),message:translateEnglish('Used {used} / {capacity}. Increase capacity to continue uploading.',{used:formatStorageSize(used),capacity:formatStorageSize(capacity)}),action:translateEnglish("Get more storage")} : { title: '套餐容量不足', message: `已用 ${formatStorageSize(used)} / ${formatStorageSize(capacity)}，请增加额度后继续上传。`, action: '购买更多额度' };
 }
 export function renewalReminderAt(ends) {
 	const value = new Date(ends), day = value.getUTCDate();
@@ -39,7 +40,7 @@ export function renewalReminderAt(ends) {
 export function billingCard(data, connected, now = Date.now()) {
 	const rights = data?.entitlement, order = data?.currentOrder;
 	const hidePendingOrder = rights?.paid === true && rights.ends > now && pending.has(order?.status) && order.failureCode !== 'paid_plan_conflict';
-	const showOrder = order && !hidePendingOrder && (order.status !== 'paid' || order.purpose === 'test' || order.failureCode === 'paid_plan_conflict');
+	const showOrder = order && order.status !== 'expired' && !hidePendingOrder && (order.status !== 'paid' || order.purpose === 'test' || order.failureCode === 'paid_plan_conflict');
 	const free = ['cn-free','global-free'].includes(rights?.plan) && rights?.paid !== true;
 	const purchased = !free && (rights?.paid === true || data?.everPurchased === true);
 	const ends = rights?.ends ?? data?.lastPurchase?.ends;
@@ -62,21 +63,22 @@ export function billingCard(data, connected, now = Date.now()) {
 		expires: free && rights.starts ? `开通日期：${new Date(rights.starts).toLocaleDateString('zh-CN')}` : purchased && ends && !refunded ? `到期时间：${new Date(ends).toLocaleDateString('zh-CN')}` : '',
 		help: free ? connected ? '账号下所有笔记库共用100MB容量，免费套餐规则以届时公布为准。' : ['failed','uncertain','purchase_conflict'].includes(data?.registration) ? '免费套餐已开通，登录信息发送待处理，请联系支持。' : '免费套餐已开通，请使用邮件中的登录信息登录。' : !purchased ? '' : renewed ? '续费成功，原账号及登录信息继续有效。' : !connected ? ['failed','uncertain','purchase_conflict'].includes(data?.registration) ? '付款已确认，登录信息发送待处理，请联系支持。' : '付款已确认，请使用邮件中的登录信息登录。'
 			: refunded ? '套餐已退款，可重新购买开通。' : expired ? '套餐已到期，续费后继续使用。' : due ? '距离到期不足一个月，可提前续费，不自动扣款。' : '账号下所有笔记库共用套餐容量，不自动扣款。',
-		order: showOrder ? [purchased ? order.title : '', order.purpose === 'test' ? '1分钱测试' : '', order.failureCode === 'paid_plan_conflict' ? '付款已收到，待核对' : statuses[order.status] ?? '订单处理中'].filter(Boolean).join(' · ') + (order.status === 'paid' && order.purpose === 'test' ? '，套餐权益未改变' : '') : '',
+		order: showOrder ? [purchased ? order.title : '', order.purpose === 'test' ? '1分钱测试' : '', order.failureCode === 'paid_plan_conflict' ? '付款已收到，待核对' : (edition.edition === 'global' ? translateEnglish(statuses[order.status]) : statuses[order.status]) ?? '订单处理中'].filter(Boolean).join(' · ') + (order.status === 'paid' && order.purpose === 'test' ? '，套餐权益未改变' : '') : '',
 		resume: order && pending.has(order.status) ? order.id : undefined,
 	};
-	if (locale === 'en') {
-		const title = id => { const match=/^global-([1-9][0-9]*)gb-(month|year)$/.exec(id ?? ''); return match ? `${match[1]} GB · ${match[2] === 'year' ? 'Yearly' : 'Monthly'}` : 'Subscription'; };
+	if (edition.edition === 'global') {
+		const title = id => { const match=/^global-([1-9][0-9]*)gb-(month|year)$/.exec(id ?? ''); return match ? `${match[1]} GB · ${match[2] === 'year' ? translateEnglish("Yearly") : translateEnglish("Monthly")}` : translateEnglish("Subscription"); };
 		Object.assign(model, {
-			overage: connected && capacityWarning(data) ? 'Plan capacity exceeded' : '',
-			label: free ? 'Get more storage' : purchased ? 'Manage plan' : 'Choose a plan',
-			badge: !purchased ? '' : refunded ? 'Refunded' : expired ? 'Expired' : due ? 'Expiring soon' : 'Active',
-			title: free ? rights.plan === 'global-free' ? 'Free · 50 MB' : 'Free · 100 MB' : purchased ? (rights?.paid ? 'Current plan: ' : '') + title(rights?.paid ? rights.plan : data?.lastPurchase?.plan) : '',
-			usage: connected && Number.isFinite(capacity) ? Number.isFinite(usage) ? `Used ${formatStorageSize(usage)} / ${formatStorageSize(capacity)}` : `Plan capacity ${formatStorageSize(capacity)} · usage pending` : '',
-			upcoming: rights?.upcoming ? `Next plan: ${title(rights.upcoming.plan)}, starts ${new Date(rights.upcoming.starts).toLocaleDateString('en-US')}` : '',
-			expires: free && rights.starts ? `Activated: ${new Date(rights.starts).toLocaleDateString('en-US')}` : purchased && ends && !refunded ? `Access ends: ${new Date(ends).toLocaleDateString('en-US')}` : '',
-			help: data?.testMode ? 'Stripe test mode only. No real charges. Manage test renewal and cancellation in billing.' : free ? 'All vaults share this account’s free capacity.' : refunded ? 'Plan refunded. You may choose another plan.' : expired ? 'Your paid period ended. Manage your subscription to continue.' : purchased ? 'All vaults share this account’s capacity. Manage automatic renewal and cancellation in billing.' : '',
-			order: showOrder ? [order.title, statuses[order.status] ?? 'Processing order'].filter(Boolean).join(' · ') : '',
+			prominent: true,
+			overage: connected && capacityWarning(data) ? translateEnglish("Plan capacity exceeded") : '',
+			label: free ? translateEnglish("Get more storage") : purchased ? translateEnglish("Manage plan") : translateEnglish("Choose a plan"),
+			badge: !purchased ? '' : refunded ? translateEnglish("Refunded") : expired ? translateEnglish("Expired") : due ? translateEnglish("Expiring soon") : translateEnglish("Active"),
+			title: free ? rights.plan === 'global-free' ? translateEnglish("Free · 50 MB") : translateEnglish("Free · 100 MB") : purchased ? (rights?.paid ? translateEnglish("Current plan: ") : '') + title(rights?.paid ? rights.plan : data?.lastPurchase?.plan) : '',
+			usage: connected && Number.isFinite(capacity) ? Number.isFinite(usage) ? translateEnglish('Used {used} / {capacity}',{used:formatStorageSize(usage),capacity:formatStorageSize(capacity)}) : translateEnglish('Plan capacity {capacity} · usage pending',{capacity:formatStorageSize(capacity)}) : '',
+			upcoming: rights?.upcoming ? translateEnglish('Next plan: {plan}, starts {date}',{plan:title(rights.upcoming.plan),date:new Date(rights.upcoming.starts).toLocaleDateString(locale)}) : '',
+			expires: free && rights.starts ? translateEnglish('Activated: {date}',{date:new Date(rights.starts).toLocaleDateString(locale)}) : purchased && ends && !refunded ? translateEnglish('Access ends: {date}',{date:new Date(ends).toLocaleDateString(locale)}) : '',
+			help: data?.testMode ? translateEnglish("Stripe test mode only. No real charges. Manage test renewal and cancellation in billing.") : refunded ? translateEnglish("Plan refunded. You may choose another plan.") : expired ? translateEnglish("Your paid period ended. Manage your subscription to continue.") : '',
+			order: showOrder ? [order.title, (edition.edition === 'global' ? translateEnglish(statuses[order.status]) : statuses[order.status]) ?? translateEnglish("Processing order")].filter(Boolean).join(' · ') : '',
 		});
 	}
 	return model;
@@ -86,7 +88,7 @@ export function billingCard(data, connected, now = Date.now()) {
 export function mountBillingCard(setting, { connected, load, open, live, onError, target, now = Date.now }) {
 	if (!setting.infoEl || !setting.controlEl) return () => {};
 	mountedCards.get(setting.settingEl)?.();
-	setting.setName(locale === 'en' ? 'My plan' : '我的套餐');
+	setting.setName(edition.edition === 'global' ? translateEnglish("My plan") : '我的套餐');
 	setting.settingEl.classList.add('smart-sync-billing');
 	const doc = setting.infoEl.ownerDocument;
 	const view = target ?? doc.defaultView;
@@ -96,7 +98,7 @@ export function mountBillingCard(setting, { connected, load, open, live, onError
 	const upcoming = add(setting.infoEl, 'div', 'smart-sync-plan-help');
 	const usage = add(setting.infoEl, 'div', 'smart-sync-plan-usage');
 	const overage = add(setting.infoEl, 'div', 'smart-sync-plan-order'); overage.setAttribute('role', 'status');
-	const progress = add(setting.infoEl, 'progress', 'smart-sync-plan-progress'); progress.max = 1; progress.setAttribute('aria-label', locale === 'en' ? 'Plan storage usage' : '套餐容量使用情况');
+	const progress = add(setting.infoEl, 'progress', 'smart-sync-plan-progress'); progress.max = 1; progress.setAttribute('aria-label', edition.edition === 'global' ? translateEnglish("Plan storage usage") : '套餐容量使用情况');
 	const expires = add(setting.infoEl, 'div', 'smart-sync-plan-expiry');
 	const help = add(setting.infoEl, 'div', 'smart-sync-plan-help');
 	const status = add(setting.infoEl, 'div', 'smart-sync-plan-order'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
@@ -112,19 +114,19 @@ export function mountBillingCard(setting, { connected, load, open, live, onError
 		setting.settingEl.classList.toggle('is-compact', !model.title && !model.order);
 		setting.settingEl.classList.toggle('is-free', model.free);
 		upcoming.textContent = model.upcoming; upcoming.hidden = !model.upcoming;
-		help.textContent = model.help; status.textContent = model.order;
+		help.textContent = model.help; status.textContent = model.order; status.hidden = !model.order;
 		usage.hidden = !model.usage; expires.hidden = !model.expires; help.hidden = !model.help;
 		progress.hidden = model.ratio === null; progress.value = model.ratio ?? 0;
 		button.textContent = model.label; button.disabled = acting; button.hidden = !model.prominent;
 		button.classList.toggle('mod-cta', model.prominent); button.classList.toggle('is-prominent', model.prominent);
-		if (connected && !data) { badge.textContent = locale === 'en' ? 'Loading' : '读取中'; badge.hidden = false; title.textContent = locale === 'en' ? 'Loading plan information' : '正在读取套餐信息'; title.hidden = false; button.textContent = locale === 'en' ? 'Loading…' : '读取中…'; button.disabled = true; }
+		if (connected && !data) { badge.textContent = edition.edition === 'global' ? translateEnglish("Loading") : '读取中'; badge.hidden = false; title.textContent = edition.edition === 'global' ? translateEnglish("Loading plan information") : '正在读取套餐信息'; title.hidden = false; button.textContent = edition.edition === 'global' ? translateEnglish("Loading…") : '读取中…'; button.disabled = true; }
 	}
 	async function refresh() {
 		view.clearTimeout(timer);
 		if (!current() || loading || now() >= deadline || doc.hidden) return;
 		loading = true;
 		try { const result = await load(); if (current()) { data = result; render(); } }
-		catch { if (current()) status.textContent = locale === 'en' ? 'Plan information is unavailable. Reopen settings shortly.' : '套餐信息暂时无法更新，请稍后重新打开设置。'; }
+		catch { if (current()) { status.textContent = edition.edition === 'global' ? translateEnglish("Plan information is unavailable. Reopen settings shortly.") : '套餐信息暂时无法更新，请稍后重新打开设置。'; status.hidden = false; } }
 		finally { loading = false; if (current() && now() < deadline) timer = view.setTimeout(() => { void refresh(); }, billingCard(data, connected, now()).resume ? 5000 : 30000); }
 	}
 	const focus = () => { if (current()) { deadline = now() + 15 * 60000; void refresh(); } };

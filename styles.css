@@ -246,7 +246,7 @@
   .setting-item.smart-sync-billing { padding: 16px; }
 }
 
-.smart-sync-billing button.smart-sync-plan-action[hidden] { display: none !important; }
+.smart-sync-billing button.smart-sync-plan-action[hidden] { display: none; }
 
 .smart-sync-common .smart-sync-manual-action { flex-wrap: wrap; max-width: 100%; }
 .smart-sync-manual-feedback { flex-basis: 100%; margin-top: 0.4rem; font-size: var(--font-ui-small); color: var(--text-muted); overflow-wrap: anywhere; }
@@ -444,9 +444,9 @@
 /* CHG-20261027-22: reserve full-value rows and let actions wrap at enlarged mobile text sizes. */
 @container wujie (max-width:639px) {
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) { gap:2px 8px; margin-bottom:14px; }
-  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) > .setting-item-info { display:contents; }
-  .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-name { flex:0 0 auto; white-space:nowrap; }
-  .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-description { flex:1 1 100%; order:1; margin:0; }
+  .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) > .setting-item-info { flex:1 1 100%; width:100%; }
+  .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-name { white-space:normal; }
+  .smart-sync-overview-card .smart-sync-identity-row:not(.smart-sync-devices-row) .setting-item-description { margin:0; }
   .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-identity-row:not(.smart-sync-devices-row) > .setting-item-control { flex:0 0 auto; margin-inline-start:auto; }
 }
 /* Keep whole device actions readable on very narrow foldable covers with enlarged text. */
@@ -626,3 +626,41 @@
  max-width: 100%;
  white-space: normal;
 }
+
+/* CHG-20261106-GLOBAL-I18N: Global only; retain readable enlarged labels and touch targets. */
+.smart-sync-global-ui .setting-item { min-width:0; max-width:100%; box-sizing:border-box; flex-wrap:wrap; }
+.smart-sync-global-ui .setting-item-info { min-width:0; max-width:100%; }
+.smart-sync-global-ui .smart-sync-common .setting-item .setting-item-name, .smart-sync-global-ui .smart-sync-common .setting-item .setting-item-description, .smart-sync-global-ui .smart-sync-section-title, .smart-sync-global-ui .smart-sync-section-description { min-width:0; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+.smart-sync-global-ui .setting-item-control { min-width:0; max-width:100%; flex-wrap:wrap; }
+.smart-sync-global-ui button { min-width:44px; max-width:100%; min-height:44px; height:auto; white-space:normal; overflow-wrap:anywhere; display:inline-block; word-break:break-word; }
+.smart-sync-global-ui .smart-sync-common.smart-sync-overview-card > .setting-item.smart-sync-overview-action > .setting-item-control button { min-width:44px; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+.smart-sync-global-ui input, .smart-sync-global-ui select { min-width:0; max-width:100%; box-sizing:border-box; }
+@media(max-width:640px) {
+ .smart-sync-global-ui .setting-item-info { flex:1 1 100%; }
+ .smart-sync-global-ui .setting-item-control { width:100%; justify-content:flex-start; }
+ .smart-sync-global-ui .smart-sync-common > .smart-sync-title .setting-item-info { padding-left:0; }
+ .smart-sync-global-ui .smart-sync-title .setting-item-name { display:block; }
+ .smart-sync-global-ui .smart-sync-title .setting-item-name::before { position:static; display:block; width:48px; height:48px; margin-bottom:8px; }
+}
+
+.smart-sync-global-ui .smart-sync-common > .smart-sync-title .setting-item-name { overflow:visible; text-overflow:clip; -webkit-line-clamp:unset; height:auto; max-height:none; flex:0 0 auto; }
+
+.smart-sync-global-ui .smart-sync-lan-entry { display:inline-block; max-width:100%; white-space:normal; overflow-wrap:anywhere; vertical-align:top; }
+
+.smart-sync-global-ui .smart-sync-lan-status span { min-width:0; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+
+.smart-sync-global-ui .smart-sync-section .smart-sync-scope-choice .setting-item-control { flex-wrap:wrap; }
+.smart-sync-global-ui .smart-sync-scope-choice .setting-item-control button { width:auto; flex:1 1 auto; }
+.smart-sync-global-ui .smart-sync-billing button.smart-sync-plan-action[hidden] { display:none; }
+
+.smart-sync-global-ui .smart-sync-common .setting-item.smart-sync-language-row:not(.smart-sync-billing) { display:flex; flex-direction:row; flex-wrap:wrap; align-items:center; justify-content:flex-start; gap:8px 16px; }
+.smart-sync-global-ui .smart-sync-common .setting-item.smart-sync-language-row:not(.smart-sync-billing) > .setting-item-info { flex:1 0 max-content; width:auto; max-width:100%; margin:0; text-align:start; }
+.smart-sync-global-ui .smart-sync-common .setting-item.smart-sync-language-row:not(.smart-sync-billing) > .setting-item-control { display:flex; flex:0 1 auto; width:auto; max-width:100%; margin:0; justify-content:flex-start; }
+.smart-sync-global-ui .smart-sync-language-row select { max-width:100%; }
+
+:is(.smart-sync-global-ui.smart-sync-common, .smart-sync-global-ui .smart-sync-common).smart-sync-layout-root > .setting-item.smart-sync-billing { display:flex; flex-direction:row; flex-wrap:wrap; align-items:flex-start; gap:12px 16px; }
+:is(.smart-sync-global-ui.smart-sync-common, .smart-sync-global-ui .smart-sync-common) > .setting-item.smart-sync-billing > .setting-item-info { flex:1 1 18rem; width:auto; min-width:min(100%,18rem); max-width:100%; margin:0; }
+:is(.smart-sync-global-ui.smart-sync-common, .smart-sync-global-ui .smart-sync-common) > .setting-item.smart-sync-billing > .setting-item-control { display:flex; flex:0 1 auto; width:auto; min-width:0; max-width:100%; margin:0; justify-content:flex-start; }
+.smart-sync-global-ui .smart-sync-billing .smart-sync-plan-badge { float:none; display:inline-block; max-width:100%; box-sizing:border-box; }
+.smart-sync-global-ui .smart-sync-billing .smart-sync-plan-badge[hidden] { display:none; }
+.smart-sync-global-ui .smart-sync-billing .smart-sync-plan-title { clear:both; }

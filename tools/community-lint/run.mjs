@@ -19,13 +19,14 @@ if (
 	manifest.id.endsWith('plugin')
 )
 	throw new Error('Plugin ID does not satisfy the Community manifest rules');
-const files = (await readdir('src')).filter((file) => file.endsWith('.js')).sort();
+const files = (await readdir('src', { recursive: true }))
+	.filter((file) => file.endsWith('.js')).map((file) => file.replaceAll('\\', '/')).sort();
 const map = JSON.parse(await readFile(resolve(artifactRoot, 'dependency-map.json'), 'utf8'));
 const bundled = Object.keys(map.inputs)
 	.filter((file) => file.startsWith('src/'))
 	.sort();
 if (
-	files.length !== 26 ||
+	files.length !== 27 ||
 	JSON.stringify(files.map((file) => `src/${file}`)) !== JSON.stringify(bundled)
 )
 	throw new Error('Lint coverage differs from the full client runtime closure');
@@ -69,7 +70,7 @@ const lint = new ESLint({
 			settings: { 'import/resolver': { node: { paths: [resolve(tools, 'node_modules')] } } },
 		},
 		{
-			files: ['src/*.js'],
+			files: ['src/**/*.js'],
 			languageOptions: {
 				parserOptions: {
 					project: config,
@@ -91,7 +92,7 @@ const lint = new ESLint({
 		},
 	],
 });
-const results = await lint.lintFiles(['src/*.js', 'package.json']);
+const results = await lint.lintFiles(['src/**/*.js', 'package.json']);
 // Prove the type-dependent API rule is active, rather than silently missing the SDK.
 const probe = new ESLint({
 	cwd: root,
@@ -99,7 +100,7 @@ const probe = new ESLint({
 	overrideConfig: [
 		...obsidianmd.configs.recommended,
 		{
-			files: ['src/*.js'],
+			files: ['src/**/*.js'],
 			languageOptions: {
 				parserOptions: {
 					project: config,

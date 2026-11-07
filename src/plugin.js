@@ -2,7 +2,7 @@ import { edition, assertEditionOrigin, regionalServices, logViewType } from './e
 import * as ObsidianSdk from 'obsidian';
 import { androidFallback, supportsAndroidNativeVersion } from './android-transport.js';
 import { mountBillingCard, capacityWarning, launchBillingBrowser } from './billing.js';
-import { t, locale, formatStorageSize, localizedFailure as failureMessage } from './i18n.js';
+import { t, locale, configureLanguage, supportedLanguages, formatStorageSize, localizedFailure as failureMessage } from './i18n.js';
 import { ConnectionCheckpoints } from './checkpoint.js';
 import { notePinState, queueNotePosition, moveNotePins, pinPathSet, synchronizeNotePins } from './pinning.js';
 import { registerNoteSearch } from './search.js';
@@ -642,6 +642,7 @@ export default class IndependentSync extends Plugin {
 		if (important || this.data.settings.notifications === 'all') new Notice(message);
 	}
 	async onload() {
+		configureLanguage(ObsidianSdk.getLanguage?.() ?? edition.locale);
 		try { requireRuntime(); } catch (error) { new Notice(failureMessage(error)); throw error; }
 		const retired = runtimes.get(this.app);
 		if (retired && retired !== this && retired.manifest.id !== this.manifest.id && !retired.stopped) {
@@ -652,6 +653,7 @@ export default class IndependentSync extends Plugin {
 		runtimes.set(this.app, this);
 		this.abortController = new AbortController();
 		const prior = await this.loadData();
+		configureLanguage(ObsidianSdk.getLanguage?.() ?? edition.locale, prior?.interfaceLanguage ?? 'auto');
 		if (prior && prior.format !== 3) throw new Error('Unsupported plugin configuration format');
 		this.data = prior ?? {
 			format: 3,
@@ -3627,7 +3629,7 @@ export default class IndependentSync extends Plugin {
 		if(!active()||this.stopped)throw Error('Sign-in context changed');
 		const accountBinding=reauth?await loginAccountBinding(accountKey):undefined;
 		if(!active()||this.stopped||localId!==this.data.localId||origin!==this.data.settings.origin||accountKey!==(this.secret?.('account')||this.secret?.('access')||''))throw Error('Sign-in context changed');
-		try{const saved=JSON.parse(this.secret?.('oauth')??'');if(Boolean(saved.inline)===inline&&Boolean(saved.reauth)===reauth&&(!reauth||saved.accountBinding===accountBinding)&&saved.localId===localId&&saved.origin===origin&&saved.method===method&&saved.expires>Date.now()&&saved.expires<Date.now()+11*60000&&/^[A-Za-z0-9_-]{43}$/.test(saved.id)&&/^[A-Za-z0-9_-]{43}$/.test(saved.verifier)){if(!inline)window.open(services.login+'#flow='+saved.id+'&method='+method,'_blank','noopener,noreferrer');return saved;}}catch{ /* No reusable sign-in. */ }
+		try{const saved=JSON.parse(this.secret?.('oauth')??'');if(Boolean(saved.inline)===inline&&Boolean(saved.reauth)===reauth&&(!reauth||saved.accountBinding===accountBinding)&&saved.localId===localId&&saved.origin===origin&&saved.method===method&&saved.expires>Date.now()&&saved.expires<Date.now()+11*60000&&/^[A-Za-z0-9_-]{43}$/.test(saved.id)&&/^[A-Za-z0-9_-]{43}$/.test(saved.verifier)){if(!inline)window.open(services.login+'#flow='+saved.id+'&method='+method+'&lang='+encodeURIComponent(locale),'_blank','noopener,noreferrer');return saved;}}catch{ /* No reusable sign-in. */ }
 		const verifier=btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 		const challenge=btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 		const flow=await api.request('POST',reauth?'auth/reauth':'auth/start',{challenge,label:this.deviceDisplayName()});
@@ -3636,7 +3638,7 @@ export default class IndependentSync extends Plugin {
 		if(!/^[A-Za-z0-9_-]{43}$/.test(flow.id??'')||flow.url!==expected||!Number.isSafeInteger(flow.expires)||flow.expires<=Date.now()||flow.expires>Date.now()+11*60000)throw Error('Invalid Global sign-in link');
 		const saved={id:flow.id,verifier,expires:flow.expires,localId,origin,method,reauth,inline,...(reauth?{accountBinding}:{})};
 		this.app.secretStorage.setSecret(`${this.manifest.id}-${localId}-oauth`,JSON.stringify(saved));
-		if(!inline)window.open(expected+'&method='+method,'_blank','noopener,noreferrer');return saved;
+		if(!inline)window.open(expected+'&method='+method+'&lang='+encodeURIComponent(locale),'_blank','noopener,noreferrer');return saved;
 	}
 	async globalEmailRequest(flow,operation,value,active=()=>true) {
 		const services=regionalServices(edition,this.data.settings.origin);
@@ -3964,6 +3966,7 @@ export default class IndependentSync extends Plugin {
 		const canPrepare=Platform.isMobile&&edition.edition==='global'&&!guest&&orderId===undefined;
 		if(prepareOnly&&!canPrepare)return;
 		const openEntry = (href,expires=Date.now()+90000) => {
+            if (edition.edition === 'global') { const localized = new URL(href); const fragment = new URLSearchParams(localized.hash.slice(1)); fragment.set('lang',locale); localized.hash = fragment.toString(); href = localized.href; }
 			if (!Platform.isMobile) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
 			this.billingHandoffCancel?.();this.billingFallbackWindow?.close();
 			const showFallback=()=>{
@@ -4276,9 +4279,11 @@ export default class IndependentSync extends Plugin {
 	}
 	async addDevice() {
 		const connected = Boolean(this.data.settings.workspace);
+		const signedIn = connected || this.accountAuthorized === true;
 		const dialog = new ChoiceWindow(this.app, t('overview.addDevice'), (area) => {
-			area.createEl('p', { text: t(connected ? 'overview.approveHelp' : 'overview.pairHelp') });
+			area.createEl('p', { text: t(connected ? 'overview.approveHelp' : signedIn ? 'overview.pairSelectNotebook' : 'overview.pairHelp') });
 			if (connected) action(area, t('msg_99bd7e2889'), () => this.approveDevice(dialog));
+			else if (signedIn) action(area, t('overview.manageNotebooks'), async () => { dialog.close(); await this.manageNotebooks(); });
 			else action(area, t('msg_7db459b789'), () => this.pairThisDevice());
 		});
 		dialog.open();
@@ -5207,6 +5212,8 @@ export class IndependentSettings extends PluginSettingTab {
 				const element = setting.settingEl;
 				if (!element) return cleanup;
 				this.containerEl.classList.add('smart-sync-settings-page');
+                this.containerEl.classList.toggle('smart-sync-global-ui', edition.edition === 'global');
+                if (edition.edition === 'global') { this.containerEl.setAttribute?.('lang',locale); this.containerEl.setAttribute?.('dir','ltr'); }
 				(group?.listEl ?? element.parentElement).classList.add('smart-sync-common');
 				if ([t('version.title'), t('msg_b848f4c702'), t('billing.myPlan')].includes(definition.name))
 					(group?.listEl ?? element.parentElement).classList.add('smart-sync-layout-root');
@@ -5402,12 +5409,12 @@ export class IndependentSettings extends PluginSettingTab {
 		const devices = row(
 			t('overview.devices'),
 			(setting) => {
-				setting.setDesc(t(connected ? 'overview.approveHelp' : 'overview.pairHelp'));
+				setting.setDesc(t(connected ? 'overview.approveHelp' : accountConnected ? 'overview.pairSelectNotebook' : 'overview.pairHelp'));
 				setting.settingEl?.classList.add('smart-sync-devices-row');
 				// Native settings refreshes can reuse the row and leave custom children.
 				for (const previous of setting.settingEl?.querySelectorAll('.smart-sync-pair-help') ?? []) previous.remove();
-				const help = setting.settingEl?.createEl('p', { cls: 'smart-sync-pair-help', text: t(connected ? 'overview.pairHint' : 'overview.pairHelp') });
-				if (connected) {
+				const help = setting.settingEl?.createEl('p', { cls: 'smart-sync-pair-help', text: t(connected ? 'overview.pairHint' : accountConnected ? 'overview.pairSelectNotebook' : 'overview.pairHelp') });
+				if (accountConnected) {
 					bindAction(setting, t('overview.deviceManagement'), () => plugin.devices());
 					bindAction(setting, t('overview.addDevice'), () => plugin.addDevice());
 				} else bindAction(setting, t('overview.pair'), () => plugin.pairThisDevice());
@@ -5458,6 +5465,16 @@ export class IndependentSettings extends PluginSettingTab {
 		});
 		return [
 			...header.map(present),
+            ...(edition.edition === 'global' ? [row(t('language.title'), setting => {
+                setting.settingEl?.classList.add('smart-sync-language-row');
+                return setting.addDropdown(input => input.addOptions({auto:t('language.auto'),...supportedLanguages}).setValue(plugin.data.interfaceLanguage ?? 'auto').onChange(async value => {
+                if (value !== 'auto' && !Object.hasOwn(supportedLanguages,value)) return;
+                const previous = plugin.data.interfaceLanguage;
+                plugin.data.interfaceLanguage = value;
+                try { await plugin.saveData(plugin.data); plugin.notify(t('language.saved')); }
+                catch (error) { if (plugin.data.interfaceLanguage === value) plugin.data.interfaceLanguage = previous; plugin.notify(failureMessage(error)); }
+                }));
+            })] : []),
 			{ type: 'group', name: t('overview.card'), cls: 'smart-sync-overview-group', items: [
 				...(accountConnected ? [overviewItem(notebook)] : []),
 				overviewItem(account), overviewItem(devices), overviewItem(status),

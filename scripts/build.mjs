@@ -26,6 +26,7 @@ const result = await build({
 	external: ['obsidian', '@codemirror/state', '@codemirror/view'],
 	outfile: `${output}/main.js`,
 	define: {
+        __SMART_SYNC_GLOBAL_UI__: JSON.stringify(config?.edition === 'global'),
 		...(config ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...config, development: false }) } : {}),
 		__SMART_SYNC_TRAY_LOGO__: JSON.stringify(`data:image/png;base64,${logo}`),
 	},
