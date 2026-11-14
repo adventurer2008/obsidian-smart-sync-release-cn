@@ -15,6 +15,7 @@ import { BATCH_BYTES } from './client.js';
 // Dirty state follows the connection across short-lived engine instances, including failed saves.
 const unsavedStates = new WeakSet();
 const isMarkdown = path => path.toLowerCase().endsWith('.md');
+const CONTENT_POLL_INTERVAL_MS = 1000;
 
 export function emptyState() {
 	return { format: 3, cursor: 0, notes: {}, conflicts: [] };
@@ -144,6 +145,7 @@ export class NotebookSynchronizer {
 	#prefetchedInfo = new Map();
 	#queuedUploads = [];
 	#contentPoll;
+	#nextContentPollAt = Infinity;
 	#bulkRemoved = new Set();
 	#remoteHeads = new Map();
 	#remoteFiles = new Map();
@@ -1148,6 +1150,7 @@ export class NotebookSynchronizer {
 				}
 				if (!batch.more) break;
 			}
+			this.#nextContentPollAt = performance.now() + CONTENT_POLL_INTERVAL_MS;
 			// Read all pages before applying: historical intermediate paths can be
 			// occupied by the latest files retained across a reconnect. Only each
 			// note's newest validated revision describes the desired remote state.
@@ -1188,6 +1191,7 @@ export class NotebookSynchronizer {
 						}
 						if (!batch.more) break;
 					}
+					this.#nextContentPollAt = performance.now() + CONTENT_POLL_INTERVAL_MS;
 					// Applying ahead never advances the durable feed cursor across pending bulk entries.
 					return this.#receiveContent(fresh);
 				};
@@ -1466,21 +1470,40 @@ export class NotebookSynchronizer {
 		let checked = 0,
 			lastYield = Date.now();
 		let sendingAttachments = false;
+		let transferredSincePoll = false;
 		for (const raw of paths) {
-			if (!folderSet.has(raw) && !isMarkdown(raw) && !sendingAttachments) {
-				await flushUploads();
-				sendingAttachments = true;
-			}
-			if (!priorityPaths && !targets && ceiling === undefined && (this.contentPriorities.size || (checked > 0 && checked % this.batchFiles === 0 && this.#contentPoll))) {
-				// Finish an existing batch before sharing the normal send pipeline.
-				await flushUploads();
-				const prioritized = new Set([...(await this.#contentPoll?.() ?? []), ...await this.#prioritizeContent()]);
-				for (const [id, note] of Object.entries(this.state.notes))
-					if (!note.removed && prioritized.has(note.path)) { byPath.set(note.path, [id, note]); used.add(id); present.add(note.path); }
-			}
 			this.assertActive();
 			const path = safeNotePath(raw);
 			if (this.excluded(path)) continue;
+			const startingAttachments = !sendingAttachments && !folderSet.has(path) && !isMarkdown(path);
+			if (startingAttachments) {
+				await flushUploads();
+				sendingAttachments = true;
+			}
+			if (!priorityPaths && !targets && ceiling === undefined) {
+				const hasPriorityNote = this.contentPriorities.size > 0 && Array.from(this.contentPriorities.keys()).some(isMarkdown);
+				// Keep the existing checkpoints while publishing changes. A scan
+				// of unchanged files only needs the elapsed-time checks.
+				const transferBoundary = transferredSincePoll && checked % this.batchFiles === 0;
+				const pollRemote = this.#contentPoll && (
+					transferBoundary || (startingAttachments && checked > 0) || performance.now() >= this.#nextContentPollAt
+				);
+				if (hasPriorityNote || pollRemote) {
+					// Finish an existing batch before sharing the normal send pipeline.
+					if (!startingAttachments) await flushUploads();
+					const remotePaths = pollRemote ? await this.#contentPoll() : [];
+					if (pollRemote) transferredSincePoll = false;
+					const prioritized = new Set([...remotePaths, ...await this.#prioritizeContent()]);
+					if (prioritized.size) {
+						for (const [id, note] of Object.entries(this.state.notes)) {
+							if (note.removed || !prioritized.has(note.path)) continue;
+							byPath.set(note.path, [id, note]);
+							used.add(id);
+							present.add(note.path);
+						}
+					}
+				}
+			}
 			const kind = folderSet.has(path) ? 'folder' : 'file';
 			const file =
 				kind === 'folder'
@@ -1554,6 +1577,7 @@ export class NotebookSynchronizer {
 				id = await fingerprint(crypto.getRandomValues(new Uint8Array(32)));
 			if (targets && !targets.has(id) && !targets.has(pathKey)) continue;
 			if (this.direction === 'update' && (!previous || previous.removed)) continue;
+			transferredSincePoll = true;
 			if (this.batchTransfer && typeof this.api.storeBatch === 'function' && typeof this.api.commitBatch === 'function' && kind === 'file' && previous?.digest === digest) {
 				await this.#task({ note: id, pathKey, direction: 'send', path }, async () => {
 					const reusable = await reusableInfo(id,previous);

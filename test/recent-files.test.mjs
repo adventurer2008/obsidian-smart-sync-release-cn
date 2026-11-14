@@ -184,7 +184,7 @@ test('layout ready adds enabled left tabs once without activating, revealing or 
  app.workspace.revealLeaf=()=>{throw Error('startup must not reveal a sidebar');};
  app.workspace.getLeftLeaf=split=>{
   assert.equal(split,false);
-  const leaf={async setViewState(state){created.push(state);leaves.set(state.type,[leaf]);},detach(){for(const [type,list] of leaves) if(list.includes(leaf)) leaves.delete(type);}};
+  const leaf={async setViewState(state){created.push(state);leaves.set(state.type,[leaf]);},async loadIfDeferred(){},detach(){for(const [type,list] of leaves) if(list.includes(leaf)) leaves.delete(type);}};
   return leaf;
  };
  const owner={app,manifest:{id:'test'},data:{settings:{}},registerEvent(){},registerView(){},register:callback=>{dispose=callback;},
@@ -196,4 +196,48 @@ test('layout ready adds enabled left tabs once without activating, revealing or 
  owner.data.settings.recentEnabled=false; await owner.refreshNoteTools(); assert.equal(leaves.has('test-recent-files'),false);
  owner.data.settings.recentEnabled=true; await owner.refreshNoteTools(); assert.equal(created.length,2);
  dispose(); leaves.delete('test-recent-files'); ready(); await owner.refreshNoteTools(); assert.equal(created.length,2);
+});
+
+test('sidebar entries get their titles and icons before selection on restored and new layouts', async () => {
+	const { app } = fixture();
+	const searchType = 'wujie-sync-note-search', recentType = 'wujie-sync-recent-files';
+	const factories = new Map(), leaves = new Map();
+	let ready;
+	const deferredLeaf = () => ({
+		loads: 0,
+		get isDeferred() { return !(this.view instanceof NoteSearchView); },
+		async setViewState({ type, active }) {
+			assert.equal(active, false);
+			this.type = type;
+			this.view = { getDisplayText: () => type, getIcon: () => 'ghost' };
+			leaves.set(type, this);
+		},
+		async loadIfDeferred() {
+			assert.equal(this.isDeferred, true);
+			this.loads++;
+			await Promise.resolve();
+			this.view = factories.get(this.type)(this);
+		},
+	});
+	const restored = deferredLeaf();
+	await restored.setViewState({ type: searchType, active: false });
+	restored.setViewState = () => assert.fail('must preserve the restored leaf state');
+	app.workspace.on = app.vault.on = () => ({});
+	app.workspace.onLayoutReady = callback => { ready = callback; };
+	app.workspace.getLeavesOfType = type => leaves.has(type) ? [leaves.get(type)] : [];
+	app.workspace.getLeftLeaf = deferredLeaf;
+	app.workspace.revealLeaf = () => assert.fail('must preserve the selected panel');
+	const owner = { app, manifest: { id: 'wujie-sync' }, registerEvent() {}, addCommand() {},
+		registerView: (type, factory) => factories.set(type, factory) };
+	registerNoteSearch(owner);
+	assert.equal(restored.view.getDisplayText(), searchType);
+	ready();
+	await Promise.all([owner.refreshNoteTools(), owner.refreshNoteTools()]);
+	assert.equal(leaves.get(searchType), restored);
+	assert.equal(restored.view.getDisplayText(), '搜索笔记');
+	assert.equal(restored.view.getIcon(), 'file-search-2');
+	const recent = leaves.get(recentType);
+	assert.equal(recent.view.getDisplayText(), '最近');
+	assert.equal(recent.view.getIcon(), 'history');
+	assert.deepEqual([restored.loads, recent.loads], [1, 1]);
 });

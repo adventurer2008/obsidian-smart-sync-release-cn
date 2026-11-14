@@ -251,6 +251,11 @@ export class WorkspaceApi {
 	info() {
 		return this.request('GET', `workspaces/${this.workspace}`);
 	}
+	async watchChanges(after, pinsAfter) {
+		const result = await this.request('GET', this.scope(`watch?after=${after}&pinsAfter=${pinsAfter}&wait=20000`));
+		if (typeof result?.changed !== 'boolean') throw new Error('Invalid change notification');
+		return result.changed;
+	}
 	scope(path) {
 		if (!/^[a-f0-9-]{36}$/.test(this.workspace)) throw new Error('Select a protocol 2 workspace');
 		return `workspaces/${this.workspace}/${path}`;

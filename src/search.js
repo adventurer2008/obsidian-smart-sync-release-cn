@@ -160,7 +160,7 @@ export function registerNoteSearch(owner) {
 		if (!leaf) return;
 		await leaf.setViewState({ type, active: true });
 		await owner.app.workspace.revealLeaf(leaf);
-		if (focus) leaf.view.focusSearch();
+		if (focus && leaf.view instanceof NoteSearchView) leaf.view.focusSearch();
 	};
 	owner.openRecentFiles = () => openView(recentType, false);
 	owner.openNoteSearch = () => openView(viewType, true);
@@ -168,13 +168,21 @@ export function registerNoteSearch(owner) {
 	owner.register?.(() => { disposed = true; });
 	const opening = new Map();
 	const ensureDefaultView = type => {
-		if (disposed || owner.app.workspace.getLeavesOfType(type).length) return;
+		if (disposed) return;
 		if (opening.has(type)) return opening.get(type);
-		const leaf = owner.app.workspace.getLeftLeaf(false);
-		if (!leaf) return;
-		const task = leaf.setViewState({ type, active: false }).then(() => {
-			if (disposed || !enabled(type === recentType)) leaf.detach();
-		}).finally(() => opening.delete(type));
+		const leaves = owner.app.workspace.getLeavesOfType(type);
+		const leaf = leaves.length ? null : owner.app.workspace.getLeftLeaf(false);
+		const views = leaf ? [leaf] : leaves.filter(restored => restored.isDeferred);
+		if (!views.length) return;
+		const task = (async () => {
+			if (leaf) await leaf.setViewState({ type, active: false });
+			if (disposed || !enabled(type === recentType)) {
+				leaf?.detach();
+				return;
+			}
+			// Sidebar titles and icons come from the real views, even while they are hidden.
+			await Promise.all(views.map(viewLeaf => viewLeaf.loadIfDeferred()));
+		})().finally(() => opening.delete(type));
 		opening.set(type, task);
 		return task;
 	};

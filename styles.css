@@ -1,3 +1,13 @@
+.status-bar-item.smart-sync-status-bar:not(:empty) {
+	display: block;
+	box-sizing: border-box;
+	inline-size: min(27em, 45vw);
+	min-inline-size: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
 .smart-sync-v2-preview {
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
@@ -664,3 +674,239 @@
 .smart-sync-global-ui .smart-sync-billing .smart-sync-plan-badge { float:none; display:inline-block; max-width:100%; box-sizing:border-box; }
 .smart-sync-global-ui .smart-sync-billing .smart-sync-plan-badge[hidden] { display:none; }
 .smart-sync-global-ui .smart-sync-billing .smart-sync-plan-title { clear:both; }
+.cm-tooltip.smart-sync-translation-tooltip[hidden],
+.wujie-encryption-selection-tools .smart-sync-translation-mobile-trigger[hidden] {
+	display: none;
+}
+.cm-tooltip.smart-sync-translation-tooltip {
+	z-index: var(--layer-popover);
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+}
+.smart-sync-reading-translation {
+	position: fixed;
+	z-index: var(--layer-popover);
+}
+.smart-sync-reading-translation .smart-sync-translation-panel {
+	max-height: var(--reading-translation-height);
+	overflow: auto;
+}
+.smart-sync-translation-tooltip button.smart-sync-translation-trigger {
+	display: grid;
+	place-items: center;
+	width: 38px;
+	height: 38px;
+	padding: 0;
+	border: 1px solid #98e9da;
+	border-radius: 14px;
+	background: #e1fcf6;
+	box-shadow: 0 4px 12px #003c3540;
+}
+.smart-sync-translation-tooltip button.smart-sync-translation-trigger:hover {
+	background: #bcf8eb;
+}
+.smart-sync-translation-mascot {
+	display: block;
+	flex: none;
+	width: 28px;
+	height: 28px;
+	background: center / contain no-repeat url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 11V6' stroke='%230d655c' stroke-width='2.5'/%3E%3Ccircle cx='20' cy='5.5' r='2.8' fill='%23ffc86b' stroke='%230d655c' stroke-width='1.3'/%3E%3Crect x='3' y='17' width='34' height='13' rx='5' fill='%2359d5be' stroke='%230d655c' stroke-width='1.5'/%3E%3Crect x='7' y='10' width='26' height='25' rx='9' fill='%23d4fff3' stroke='%230d655c' stroke-width='1.8'/%3E%3Crect x='11' y='15' width='18' height='13' rx='5' fill='%23115352'/%3E%3Ccircle cx='16' cy='21' r='1.7' fill='%237ef8e0'/%3E%3Ccircle cx='24' cy='21' r='1.7' fill='%237ef8e0'/%3E%3Cpath d='M18 30h4' stroke='%232ba591' stroke-width='1.6' stroke-linecap='round'/%3E%3Cpath d='M35 6v7m-3.5-3.5h7' stroke='%23ffc86b' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+.smart-sync-translation-tooltip button.smart-sync-translation-trigger[hidden] {
+	display: none;
+}
+.cm-editor:not(.cm-focused) .smart-sync-translation-trigger:not(:focus-visible) {
+	visibility: hidden;
+}
+.smart-sync-translation-panel {
+	box-sizing: border-box;
+	width: min(480px, calc(100vw - 24px));
+	border: 1px solid var(--translation-border);
+	border-radius: 14px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	box-shadow: 0 10px 36px #062f3438, var(--shadow-s);
+	font-family: var(--font-interface);
+}
+:is(.smart-sync-translation-panel, .smart-sync-translation-modal) {
+	--translation-ink: #0a665c;
+	--translation-tint: #edf9f6;
+	--translation-border: #c9e6df;
+}
+.theme-dark :is(.smart-sync-translation-panel, .smart-sync-translation-modal) {
+	--translation-ink: #8ee8d5;
+	--translation-tint: #193631;
+	--translation-border: #385b53;
+}
+.smart-sync-translation-header {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	padding: 6px 12px;
+	background: linear-gradient(110deg, #075f59, #128176);
+	color: #fff;
+	border-radius: 13px 13px 0 0;
+}
+.smart-sync-translation-source {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: var(--font-semibold);
+	padding: 5px 10px;
+	border: 1px solid #ffffff42;
+	border-radius: 7px;
+	background: #ffffff17;
+}
+.smart-sync-translation-header button.smart-sync-translation-dismiss {
+	display: grid;
+	flex: none;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	background: transparent;
+	color: #fff;
+	box-shadow: none;
+}
+.smart-sync-translation-header button.smart-sync-translation-dismiss:hover {
+	background: #ffffff28;
+}
+.smart-sync-translation-header button.smart-sync-translation-dismiss:focus-visible {
+	outline: 2px solid #c2fff2;
+	outline-offset: 1px;
+}
+.smart-sync-translation-controls {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	padding: 7px 12px;
+	border-top: 1px solid var(--translation-border);
+	border-radius: 0 0 13px 13px;
+	background: var(--background-secondary);
+}
+.smart-sync-translation-controls [hidden] {
+	display: none;
+}
+.smart-sync-translation-output {
+	max-height: min(400px, 44vh);
+	padding: 12px;
+	overflow: auto;
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+	user-select: text;
+}
+.smart-sync-dictionary-source {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	margin-block: 4px;
+}
+.smart-sync-dictionary-source > summary {
+	cursor: pointer;
+	padding: 8px 10px;
+	color: var(--text-normal);
+	font-weight: var(--font-semibold);
+}
+.smart-sync-dictionary-source > summary:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: -2px;
+}
+.smart-sync-dictionary {
+	white-space: normal;
+	line-height: 1.5;
+}
+.smart-sync-dictionary-hero {
+	padding: 9px 12px 11px;
+	border: 1px solid var(--translation-border);
+	border-radius: 10px;
+	background: var(--translation-tint);
+}
+.smart-sync-dictionary-kicker,
+.smart-sync-dictionary-label {
+	color: var(--translation-ink);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+}
+.smart-sync-dictionary-word {
+	font-size: 1.6em;
+	font-weight: var(--font-semibold);
+	line-height: 1.2;
+	margin: 2px 0 5px;
+}
+.smart-sync-dictionary-phonetics,
+.smart-sync-dictionary-forms {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1) var(--size-4-3);
+	color: var(--text-muted);
+}
+.smart-sync-dictionary-phonetics span {
+	padding: 1px 7px;
+	border: 1px solid var(--translation-border);
+	border-radius: 999px;
+	background: var(--background-primary);
+}
+.smart-sync-dictionary-definitions {
+	display: grid;
+	grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+	align-items: start;
+	gap: 6px 9px;
+	margin: 5px 0 0;
+}
+.smart-sync-dictionary-definitions dt {
+	padding: 0 6px;
+	border-radius: 5px;
+	background: var(--translation-tint);
+	color: var(--translation-ink);
+	font-weight: var(--font-semibold);
+}
+.smart-sync-dictionary-definitions dd {
+	margin: 0;
+}
+.smart-sync-dictionary-label {
+	margin: 11px 0 4px;
+}
+.smart-sync-dictionary-forms span {
+	padding: 2px 7px;
+	border-radius: 5px;
+	background: var(--background-secondary);
+}
+.smart-sync-dictionary-examples {
+	margin: 0;
+	padding: 7px 9px 7px 2.1em;
+	border-radius: 8px;
+	background: var(--translation-tint);
+}
+.smart-sync-dictionary-examples li::marker {
+	color: var(--translation-ink);
+	font-weight: var(--font-semibold);
+}
+.smart-sync-dictionary-examples li + li {
+	margin-top: var(--size-4-2);
+}
+.smart-sync-dictionary-example-translation {
+	color: var(--text-muted);
+}
+.smart-sync-translation-modal .modal-title,
+.smart-sync-translation-modal .modal-close-button {
+	display: none;
+}
+.modal-container.smart-sync-translation-sheet {
+	align-items: end;
+}
+.smart-sync-translation-sheet .smart-sync-translation-modal {
+	width: min(100%, 560px);
+	max-width: 100%;
+	margin-bottom: 0;
+	padding-bottom: max(var(--size-4-4), env(safe-area-inset-bottom));
+}
+.smart-sync-translation-sheet .smart-sync-translation-controls :is(button, select) {
+	min-height: 44px;
+}
+.smart-sync-translation-sheet .smart-sync-translation-header button.smart-sync-translation-dismiss {
+	width: 44px;
+	height: 44px;
+}

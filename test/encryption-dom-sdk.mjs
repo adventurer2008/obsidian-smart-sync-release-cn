@@ -4,6 +4,7 @@ export const Platform = { isMobile: false };
 export const modals = [];
 export const notices = [];
 export const menus = [];
+export function setIcon(element, name) { element.setAttribute('data-icon', name); }
 export class Menu {
 	constructor() { this.items = []; }
 	addItem(callback) { const item = { setTitle(value) { this.title = value; return this; }, setIcon(value) { this.icon = value; return this; }, onClick(value) { this.callback = value; return this; } }; callback(item); this.items.push(item); return this; }

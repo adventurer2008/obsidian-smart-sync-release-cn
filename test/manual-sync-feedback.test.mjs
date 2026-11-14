@@ -4,7 +4,8 @@ import {registerHooks} from 'node:module';
 import {JSDOM} from 'jsdom';
 registerHooks({resolve(specifier,context,next){return specifier==='obsidian'?{url:new URL('./obsidian-double.mjs',import.meta.url).href,shortCircuit:true}:next(specifier,context);}});
 globalThis.window={};
-const {bindManualSyncAction}=await import('../src/plugin.js');
+const {default: IndependentSync,bindManualSyncAction}=await import('../src/plugin.js');
+const {Platform}=await import('./obsidian-double.mjs');
 function fixture(){
  const dom=new JSDOM('<div></div>'), root=dom.window.document.querySelector('div'), timers=new Map();let sequence=0, finish, fail; const buttons=[];
  globalThis.window={setInterval:callback=>{timers.set(++sequence,callback);return sequence;},clearInterval:id=>timers.delete(id)};
@@ -59,4 +60,48 @@ test('quick Stop ignores stale identities and reports stop persistence failures 
   if(stale)f.plugin.data.settings.workspace='another';await f.stopButton.click();assert.equal(calls,stale?0:1);
   if(!stale){assert.doesNotMatch(f.status().textContent,/已停止/);assert.equal(f.stopButton.disabled,false);}
  }finally{f.dispose();f.dom.window.close();}}
+});
+
+test('desktop status coalesces progress and discards stale updates while overview and terminal states stay immediate', () => {
+	const plugin = new IndependentSync({}, {});
+	plugin.status = plugin.addStatusBarItem();
+	plugin.data = { localId: 'synthetic', settings: { workspace: 'vault', origin: 'https://example.invalid' } };
+	plugin.cycleActivity = {};
+	const timers = new Map();
+	let sequence = 0;
+	const previousWindow = globalThis.window;
+	globalThis.window = {
+		setTimeout(callback, delay) { assert.equal(delay, 1000); timers.set(++sequence, callback); return sequence; },
+		clearTimeout(id) { timers.delete(id); },
+	};
+	const tick = () => { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); };
+	try {
+		plugin.setStatus('Running');
+		for (let checked = 100; checked <= 1000; checked += 100)
+			plugin.setStatus(`Checked ${checked}/13978`, { overview: 'Scanning', progress: true });
+		assert.equal(plugin.overviewStatusText, 'Scanning');
+		assert.equal(plugin.status.text, 'Running');
+		assert.equal(timers.size, 1);
+		tick();
+		assert.equal(plugin.status.text, 'Checked 1000/13978');
+		assert.equal(plugin.status.getAttribute('title'), plugin.status.text);
+		plugin.setStatus('Checked 1100/13978', { progress: true });
+		plugin.setStatus('Failed');
+		assert.equal(timers.size, 0);
+		assert.equal(plugin.status.text, 'Failed');
+		plugin.setStatus('Old account progress', { progress: true });
+		plugin.data.localId = 'different-account';
+		tick();
+		assert.equal(plugin.status.text, 'Failed');
+		plugin.setStatus('Queued before unload', { progress: true });
+		plugin.clearStatusBarProgress();
+		assert.equal(timers.size, 0);
+		Platform.isMobile = true;
+		plugin.setStatus('Mobile progress', { progress: true });
+		assert.equal(plugin.status.text, 'Mobile progress');
+		assert.equal(timers.size, 0);
+	} finally {
+		Platform.isMobile = false;
+		globalThis.window = previousWindow;
+	}
 });

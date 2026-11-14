@@ -20,6 +20,35 @@ test('starting a cycle waits for an in-flight presence poll then refreshes chang
 	assert.equal(peers.mode, 'paused'); assert.equal(calls, 2);
 });
 
+test('cloud sync can start before LAN signaling completes and still observes device restrictions', async t => {
+	let release, entered;
+	const ready = new Promise(resolve => { entered = resolve; });
+	const signals = new Promise(resolve => { release = resolve; });
+	let mode = 'both', presenceChecks = 0, connections = 0;
+	const peers = new LanPeers({ workspace: 'synthetic', request: async (method, route) => {
+		if (method === 'POST' && route === 'device-presence') {
+			presenceChecks++;
+			return { id: 'z', mode, peers: [{ id: 'a' }] };
+		}
+		assert.match(route, /^device-signals\?/);
+		entered();
+		return signals;
+	} }, { Peer: class { constructor() { connections++; } } });
+	t.after(() => { release({ entries: [], more: false }); peers.close(); });
+	await peers.start({ waitForSignaling: false });
+	await ready;
+	const outstanding = peers.presenceWork;
+	assert.ok(outstanding);
+	assert.equal(peers.mode, 'both');
+	mode = 'paused';
+	await peers.start({ waitForSignaling: false });
+	assert.equal(peers.mode, 'paused');
+	assert.equal(presenceChecks, 2);
+	release({ entries: [{ sender: 'a', sequence: 1, payload: { type: 'offer' } }], more: false });
+	await outstanding;
+	assert.equal(connections, 0);
+});
+
 test('stuck WebRTC negotiation expires and closes the link for cloud fallback', async () => {
 	let closed = 0;
 	const peers = new LanPeers({});

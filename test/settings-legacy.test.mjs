@@ -39,7 +39,9 @@ function fixture(t) {
 test('integrated identity retains the full account value without a separate reveal action', t => {
 	const { tab, plugin } = fixture(t);
 	plugin.secret = key => key === 'account' ? 'synthetic-account-key' : '';
-	plugin.accountEmail = 'a-very-long-synthetic-account@example.invalid';
+	const email = 'a-very-long-synthetic-account@example.invalid';
+	plugin.overviewIdentity = { scope: 'https://example.invalid||synthetic',
+		credential: 'synthetic-account-key', accountCredential: 'synthetic-account-key', email };
 	const flatten = items => items.flatMap(item => item.items ? flatten(item.items) : [item]);
 	const definition = flatten(tab.getSettingDefinitions()).find(item => item.name === '当前账号');
 	const setting = new Setting(tab.containerEl);
@@ -47,10 +49,76 @@ test('integrated identity retains the full account value without a separate reve
 	const description = info.createDiv({ cls: 'setting-item-description' });
 	setting.setDesc = text => { description.textContent = text; return setting; };
 	const dispose = definition.render(setting);
-	assert.equal(description.textContent, plugin.accountEmail);
-	assert.equal(info.title, plugin.accountEmail);
+	assert.equal(description.textContent, email);
+	assert.equal(info.title, email);
 	assert.equal(info.hasAttribute('role'), false);
 	dispose();
+});
+
+test('overview retains verified details through a vault reopen and rejects another credential or revoked session', async t => {
+	const saved = new Map();
+	const first = fixture(t);
+	const email = 'fixture@example.invalid';
+	const label = 'Fixture notebook';
+	let credential = 'fixture-access-one', offline = false, revoked = false, requestedSignal;
+	const configure = ({ plugin }) => {
+		plugin.manifest.id = 'wujie-sync';
+		plugin.data.settings.workspace = '11111111-1111-1111-1111-111111111111';
+		plugin.app = { vault: { getFiles: () => [] }, secretStorage: { setSecret: (key, value) => saved.set(key, value) } };
+		plugin.abortController = new AbortController();
+		plugin.abortController.abort();
+		plugin.secret = name => name === 'access' ? credential : saved.get('wujie-sync-synthetic-' + name) ?? '';
+		plugin.workspaceApi = () => {
+			const result = async value => {
+				requestedSignal = api.signal;
+				if (revoked) throw Object.assign(Error('Unauthorized'), { status: 401 });
+				if (offline) throw Error('Offline');
+				return value;
+			};
+			const api = {
+				request: (_method, path) => result(path === 'account' ? { email } : { logicalBytes: 25 * 1024 ** 2 }),
+				info: () => result({ label }), scope: path => path,
+			};
+			return api;
+		};
+	};
+	const waitFor = async predicate => {
+		for (let i = 0; i < 100 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5));
+		assert.ok(predicate());
+	};
+	const shown = ({ tab }, value) => [...tab.containerEl.querySelectorAll('.setting-item')]
+		.some(row => row.setting.desc?.includes(value) || row.textContent.includes(value));
+	configure(first);
+	first.tab.display();
+	await waitFor(() => shown(first, email) && shown(first, label) && shown(first, '25 MB'));
+	assert.notEqual(requestedSignal, first.plugin.abortController.signal);
+	assert.equal(requestedSignal.aborted, false);
+	first.tab.hide();
+	assert.equal(requestedSignal.aborted, true);
+
+	offline = true;
+	const reopened = fixture(t);
+	configure(reopened);
+	reopened.tab.display();
+	await waitFor(() => shown(reopened, email) && shown(reopened, label) && shown(reopened, '25 MB'));
+	credential = 'fixture-access-two';
+	reopened.tab.hide();
+	reopened.tab.display();
+	await waitFor(() => shown(reopened, '邮箱暂未提供'));
+	assert.equal(shown(reopened, email), false);
+	assert.equal(shown(reopened, label), false);
+	assert.equal(shown(reopened, '25 MB'), false);
+
+	credential = 'fixture-access-one';
+	offline = false;
+	revoked = true;
+	reopened.tab.hide();
+	reopened.tab.display();
+	await waitFor(() => !!reopened.plugin.overviewIdentity && !reopened.plugin.overviewIdentity.email &&
+		!JSON.parse(saved.get('wujie-sync-synthetic-overview-display')).email);
+	assert.equal(shown(reopened, email), false);
+	assert.equal(shown(reopened, label), false);
+	assert.equal(shown(reopened, '25 MB'), false);
 });
 
 test('integrated overview preserves all identity and synchronization routes and pairing guidance', async t => {
@@ -213,19 +281,41 @@ test('modern host delegates updates to the host without using the legacy rendere
 	tab.update(); assert.equal(updates, 1);
 });
 
-test('background tray follows search in Advanced, defaults on, persists changes and is absent on mobile', async t => {
+test('translation follows search in Advanced and defaults on for desktop and mobile', async t => {
 	const { tab, plugin } = fixture(t);
 	const advanced = tab.getSettingDefinitions().find(group => group.items?.some(item => item.name === '启用搜索'));
 	const searchIndex = advanced.items.findIndex(item => item.name === '启用搜索');
-	assert.equal(advanced.items[searchIndex + 1].name, '后台运行与托盘');
+	assert.deepEqual(advanced.items.slice(searchIndex + 1, searchIndex + 3).map(item => item.name),
+		['启用翻译功能', '后台运行与托盘']);
 	tab.display();
+	const translation = [...tab.containerEl.querySelectorAll('.setting-item')].find(el => el.setting.name === '启用翻译功能');
+	const translationToggle = translation.setting.controls.find(control => control.kind === 'toggle');
+	assert.equal(translationToggle.value, true);
+	await translationToggle.change(false);
+	assert.equal(plugin.data.settings.translationEnabled, false);
 	const row = [...tab.containerEl.querySelectorAll('.setting-item')].find(el => el.setting.name === '后台运行与托盘');
 	const toggle = row.setting.controls.find(control => control.kind === 'toggle');
 	assert.equal(toggle.value, true);
 	await toggle.change(false); assert.equal(plugin.data.settings.backgroundTray, false);
 	Platform.isMobile = true;
-	try { assert.ok(!tab.getSettingDefinitions().some(group => group.items?.some(item => item.name === '后台运行与托盘'))); }
+	try {
+		assert.ok(tab.getSettingDefinitions().some(group => group.items?.some(item => item.name === '启用翻译功能')));
+		assert.ok(!tab.getSettingDefinitions().some(group => group.items?.some(item => item.name === '后台运行与托盘')));
+	}
 	finally { Platform.isMobile = false; }
+});
+
+test('translation preference refreshes controls after saving and restores the value on failure', async () => {
+	let refreshed = 0;
+	const plugin = { data: { settings: { translationEnabled: true } },
+		saveData: async () => { throw Error('Storage full'); }, refreshTranslation() { refreshed++; } };
+	await assert.rejects(IndependentSync.prototype.setting.call(plugin, 'translationEnabled', false));
+	assert.equal(plugin.data.settings.translationEnabled, true);
+	assert.equal(refreshed, 0);
+	plugin.saveData = async () => {};
+	await IndependentSync.prototype.setting.call(plugin, 'translationEnabled', false);
+	assert.equal(plugin.data.settings.translationEnabled, false);
+	assert.equal(refreshed, 1);
 });
 
 test('tray changes persist before runtime changes; failed storage preserves the active state and synchronization stop', async () => {

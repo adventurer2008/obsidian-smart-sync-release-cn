@@ -37,11 +37,19 @@ const expected = [
 	'src/resume.js',
 ];
 if (selected) expected.push('<define:__SMART_SYNC_EDITION__>');
+// esbuild records the guarded China module and may retain its host imports in Global.
+expected.push('src/translation.js');
 expected.sort();
 const actual = Object.keys(metadata.inputs).sort();
 if (JSON.stringify(actual) !== JSON.stringify(expected))
 	throw new Error(`Unexpected source dependency: ${actual.join(', ')}`);
 const imports = Object.values(metadata.outputs).flatMap((output) => output.imports);
+if (selected) {
+	const runtime = await readFile(`${folder}/main.js`, 'utf8');
+	const translation = ['account/translate', 'translate-selection'].map(value => runtime.includes(value));
+	if (translation.some(present => present !== (selected === 'cn')))
+		throw new Error('Translation entry and request must belong to China only');
+}
 if (imports.some((entry) => !entry.external || !['obsidian', '@codemirror/state', '@codemirror/view'].includes(entry.path)))
 	throw new Error('Unexpected bundled or runtime dependency');
 const manifest = JSON.parse(await readFile('manifest.json', 'utf8'));
@@ -53,5 +61,5 @@ if (selected) {
 }
 if (JSON.stringify(manifest) !== JSON.stringify(built)) throw new Error('Manifest drift');
 console.log(
-	'Plugin closure verified: twenty-seven source modules and the licensed node-diff3, noble-ed25519 and fflate modules; Obsidian and its host CodeMirror interfaces are the only external runtime imports.',
+	'Plugin closure verified: reviewed source modules and the licensed node-diff3, noble-ed25519 and fflate modules; Obsidian and its host CodeMirror interfaces are the only external runtime imports.',
 );

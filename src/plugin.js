@@ -7,6 +7,8 @@ import { ConnectionCheckpoints } from './checkpoint.js';
 import { notePinState, queueNotePosition, moveNotePins, pinPathSet, synchronizeNotePins } from './pinning.js';
 import { registerNoteSearch } from './search.js';
 import { registerNoteEncryption } from './note-encryption.js';
+import { registerNoteTranslation } from './translation.js';
+/* global __SMART_SYNC_CN_TRANSLATION__ -- injected by the regional build. */
 import {
 	ItemView,
 	Modal,
@@ -317,6 +319,7 @@ class SyncLogView extends ItemView {
 const defaults = () => ({
 	recentEnabled: true,
 	noteSearchEnabled: true,
+	translationEnabled: true,
 	backgroundTray: true,
 	launchAtLogin: false,
 	explorerSorting: { enabled: true, grouping: 'files-first', primary: 'mtime-desc', secondary: 'none', folderPrimary: 'name-asc', folderSecondary: 'none', includeUpdated: true },
@@ -689,31 +692,35 @@ export default class IndependentSync extends Plugin {
 					window.clearTimeout(this.explorerSortTimer);
 					this.explorerSortTimer = window.setTimeout(() => this.refreshExplorerSorting(), 150);
 				}));
-		// R138 replaces legacy size presets with always / on-note-open.
-		if (workspace.on) this.registerEvent(workspace.on('file-menu', (menu, file) => {
+		const positionTitle = (key, navigator) => navigator ? t('pin.explorerAction', { action: t(key) }) : t(key);
+		const addFileMenu = (menu, file, navigator = false) => {
 			if (!this.canPinEntry(file)) return;
-			menu.addItem(item => item.setTitle(t(this.isNotePinned(file.path) ? 'pin.unpin' : 'pin.pin'))
+			menu.addItem(item => item.setTitle(positionTitle(this.isNotePinned(file.path) ? 'pin.unpin' : 'pin.pin', navigator))
 				.setIcon('pin').onClick(() => { void this.toggleNotePin(file).catch(error => this.notify(failureMessage(error))); }));
-			menu.addItem(item => item.setTitle(t(this.isNoteBottomed(file.path) ? 'pin.unbottom' : 'pin.bottom'))
+			menu.addItem(item => item.setTitle(positionTitle(this.isNoteBottomed(file.path) ? 'pin.unbottom' : 'pin.bottom', navigator))
 				.setIcon('arrow-down-to-line').onClick(() => { void this.setNoteBottoms([file], !this.isNoteBottomed(file.path)).catch(error => this.notify(failureMessage(error))); }));
 			if (file instanceof TFile && file.path.toLowerCase().endsWith('.md'))
 				menu.addItem(item => item.setTitle(t('history.contextMenu')).setIcon('history')
 					.onClick(() => { void this.history(undefined, file.path); }));
-		}));
-		if (workspace.on) this.registerEvent(workspace.on('files-menu', (menu, files) => {
+		};
+		const addFilesMenu = (menu, files, navigator = false) => {
 			const entries = files.filter(file => this.canPinEntry(file));
 			if (!entries.length) return;
 			for (const pinned of [true, false]) {
 				if (!entries.some(file => this.isNotePinned(file.path) !== pinned)) continue;
-				menu.addItem(item => item.setTitle(t(pinned ? 'pin.pin' : 'pin.unpin')).setIcon('pin')
+				menu.addItem(item => item.setTitle(positionTitle(pinned ? 'pin.pin' : 'pin.unpin', navigator)).setIcon('pin')
 					.onClick(() => { void this.setNotePins(entries, pinned).catch(error => this.notify(failureMessage(error))); }));
 			}
 			for (const bottomed of [true, false]) {
 				if (!entries.some(file => this.isNoteBottomed(file.path) !== bottomed)) continue;
-				menu.addItem(item => item.setTitle(t(bottomed ? 'pin.bottom' : 'pin.unbottom')).setIcon('arrow-down-to-line')
+				menu.addItem(item => item.setTitle(positionTitle(bottomed ? 'pin.bottom' : 'pin.unbottom', navigator)).setIcon('arrow-down-to-line')
 					.onClick(() => { void this.setNoteBottoms(entries, bottomed).catch(error => this.notify(failureMessage(error))); }));
 			}
-		}));
+		};
+		if (workspace.on) {
+			this.registerEvent(workspace.on('file-menu', (menu, file) => addFileMenu(menu, file)));
+			this.registerEvent(workspace.on('files-menu', (menu, files) => addFilesMenu(menu, files)));
+		}
 		if (this.app.vault.on) {
 			this.registerEvent(this.app.vault.on('rename', (file, from) => {
 				const { pins } = this.notePinContext();
@@ -773,7 +780,37 @@ export default class IndependentSync extends Plugin {
 			}
 		this.logViews = new Set();
 		registerNoteSearch(this);
-		registerNoteEncryption(this);
+		let translation;
+		if (typeof __SMART_SYNC_CN_TRANSLATION__ === 'undefined' ? edition.edition === 'cn' : __SMART_SYNC_CN_TRANSLATION__) {
+			translation = registerNoteTranslation(this);
+		}
+		this.closeTranslation = translation?.close;
+		this.refreshTranslation = translation?.refresh;
+		const encryption = registerNoteEncryption(this, translation?.addMobileAction, translation?.addReadingAction);
+		let navigatorMenus;
+		const refreshNavigatorMenus = () => {
+			if (this.stopped) return;
+			const menus = this.app.plugins?.plugins?.['notebook-navigator']?.api?.menus;
+			if (menus === navigatorMenus) return;
+			this.disposeNavigatorMenus?.();
+			navigatorMenus = menus;
+			const disposeFile = menus?.registerFileMenu?.(context => {
+				if (context.selection?.mode === 'multiple') {
+					addFilesMenu(context, context.selection.files, true);
+					return;
+				}
+				addFileMenu(context, context.file, true);
+				encryption.addFileMenu(context, context.file);
+			});
+			const disposeFolder = menus?.registerFolderMenu?.(context => addFileMenu(context, context.folder, true));
+			this.disposeNavigatorMenus = () => {
+				disposeFile?.();
+				disposeFolder?.();
+			};
+		};
+		refreshNavigatorMenus();
+		workspace.onLayoutReady?.(refreshNavigatorMenus);
+		if (workspace.on) this.registerEvent(workspace.on('layout-change', refreshNavigatorMenus));
 		this.refreshBackgroundTray();
 		if (!Platform.isMobile && windowsStartupSupported(window.require) && this.registerObsidianProtocolHandler) {
 			this.registerObsidianProtocolHandler(`${this.manifest.id}-startup`, params => {
@@ -851,6 +888,7 @@ export default class IndependentSync extends Plugin {
 			});
 		}
 		this.status = this.addStatusBarItem();
+		if (!Platform.isMobile) this.status.classList.add('smart-sync-status-bar');
 		this.setStatus(t(this.data.manualSyncStopped ? 'task.stopped' : this.data.settings.direction === 'paused' ? 'msg_c4f91c861a' : 'sync.ready'));
 		this.tab = new IndependentSettings(this.app, this);
 		this.addSettingTab(this.tab);
@@ -914,6 +952,7 @@ export default class IndependentSync extends Plugin {
 		const automaticStartedAt = Date.now();
 		this.registerInterval(
 			window.setInterval(() => {
+				if (this.pollRemoteChanges()) return;
 				if (
 					this.data.settings.direction !== 'paused' &&
 					this.data.settings.autoTimer !== false &&
@@ -1027,6 +1066,14 @@ export default class IndependentSync extends Plugin {
 			try { await this.saveData(this.data); }
 			catch (error) { this.data.settings[name] = previous; throw error; }
 			await this.refreshNoteTools();
+			return;
+		}
+		if (name === 'translationEnabled') {
+			const previous = this.data.settings.translationEnabled;
+			this.data.settings.translationEnabled = value === true;
+			try { await this.saveData(this.data); }
+			catch (error) { this.data.settings.translationEnabled = previous; throw error; }
+			this.refreshTranslation?.();
 			return;
 		}
 		this.idleRounds = 0;
@@ -1873,6 +1920,8 @@ export default class IndependentSync extends Plugin {
 		report.receiveCache = this.receiveCache?.snapshot();
 		report.timingScope = 'plugin-session';
 		report.timings = structuredClone(this.phaseTimings ?? {});
+		if (this.lastReceiveTiming?.scope === scope)
+			report.lastReceiveTiming = { ...this.lastReceiveTiming.timing };
 		report.pendingDiagnostics = this.data.taskOutbox?.length ?? 0;
 		report.androidTransportDiagnostics = this.data.androidTransportDiagnostics ?? [];
 		if (activity) report.activity = {
@@ -2001,7 +2050,8 @@ export default class IndependentSync extends Plugin {
 			peers.api = api;
 			peers.enabled = this.data.settings.lanAcceleration !== false;
 			try {
-				await peers.start();
+				const waitForSignaling = edition.edition !== 'cn' || !/-alpha\./.test(this.manifest.version);
+				await peers.start({ waitForSignaling });
 			} catch (error) {
 				if (!peers.mode) throw error;
 				peers.drop();
@@ -2012,7 +2062,7 @@ export default class IndependentSync extends Plugin {
 		});
 		await this.devicePreparing;
 	}
-	async connection({ allowIdleScan = false } = {}) {
+	async connection({ allowIdleScan = false, mark = () => {} } = {}) {
 		const notePath = value => safeHostPath(value, Platform.isWin === true);
 		const api = this.api();
 		this.syncStage('connecting');
@@ -2051,6 +2101,7 @@ export default class IndependentSync extends Plugin {
 			});
 		this.ensureCurrent(api);
 		this.workspaceKeys = { binding: keyBinding, at: cachedKeys?.keys === keys ? cachedKeys.at : Date.now(), keys };
+		mark('unlockedMs');
 		const connectionId = `${api.origin}|${api.workspace}`;
 		const taskScope = await fingerprint(new TextEncoder().encode(connectionId));
 		this.taskScope = taskScope;
@@ -2064,6 +2115,7 @@ export default class IndependentSync extends Plugin {
 		this.syncStage('device');
 		await this.prepareDevice(api);
 		this.ensureCurrent(api);
+		mark('deviceReadyMs');
 		if (info.logicalStorage === 1 && this.lanPeers?.mode !== 'paused') {
 			await reconcileLogicalUsage(api, keys);
 			this.ensureCurrent(api);
@@ -2085,6 +2137,13 @@ export default class IndependentSync extends Plugin {
 		};
 		this.syncStage('scanning');
 		await desktop?.prepare();
+		const feed = api.feed.bind(api);
+		api.feed = async (...args) => {
+			mark('firstFeedRequestedMs');
+			const batch = await feed(...args);
+			mark('firstFeedReceivedMs');
+			return batch;
+		};
 		let aliasRevision, aliasIndex;
 		const abstractForPath = async path => {
 			const direct = this.app.vault.getAbstractFileByPath(path);
@@ -2369,11 +2428,13 @@ export default class IndependentSync extends Plugin {
 				if (this.cycleActivity && Number.isSafeInteger(scan?.checked) && Number.isSafeInteger(scan?.total) && scan.checked >= 0 && scan.total >= scan.checked)
 					this.cycleActivity.scan = { checked: scan.checked, total: scan.total };
 				this.syncStage('scanning');
-				this.setStatus(t('msg_242eab2e90', { text: text }), { overview: this.transferPhase ?? t('overview.scanning') });
+				this.setStatus(t('msg_242eab2e90', { text: text }), { overview: this.transferPhase ?? t('overview.scanning'), progress: true });
 				this.logEvent(text);
 			},
 			onTask: async (event) => {
 				if (this.cycleActivity) this.cycleActivity.changed = true;
+				if (event.direction === 'receive' && event.status === 'running') mark('firstReceiveStartedMs');
+				if (event.direction === 'receive' && event.status === 'done') mark('firstReceiveFinishedMs');
 				if (this.cycleActivity && event.direction === 'receive' && event.status === 'done')
 					this.cycleActivity.received = (this.cycleActivity.received ?? 0) + 1;
 				if (event.direction === 'send' || event.direction === 'receive') {
@@ -2429,7 +2490,8 @@ export default class IndependentSync extends Plugin {
 			peers.provideNote = localNoteProvider({ keys, workspace: api.workspace, state, host: scopedHost, cache: receiveCache, accepts: path => !engine.excluded(path) });
 			api.peerContents = (note, manifest, info, sinkFor, onTiming) => receivePeerNote(peers, keys, api.workspace, note, manifest, info, sinkFor, onTiming);
 		}
-		return { api, keys, engine, host: scopedHost, pinsSupported: info.notePins === 1, positionsSupported: info.notePositions === 1 };
+		return { api, keys, engine, host: scopedHost, pinsSupported: info.notePins === 1, positionsSupported: info.notePositions === 1,
+			changeWatch: info.changeWatch === 1 && transport.route === 'primary' };
 	}
 	async exclusive(task) {
 		if (this.stopped) throw new Error('Plugin is unloaded');
@@ -2451,7 +2513,18 @@ export default class IndependentSync extends Plugin {
 		for (const update of this.statusListeners ?? []) update(text);
 		if (this.logViews?.size) this.refreshTasks();
 	}
-	setStatus(text, { overview = text } = {}) {
+	writeStatusBar(text) {
+		if (this.status.textContent === text) return;
+		this.status.setText(text);
+		if (!Platform.isMobile) this.status.setAttribute('title', text);
+	}
+	clearStatusBarProgress() {
+		if (!this.statusBarProgress) return;
+		window.clearTimeout(this.statusBarProgress.timer);
+		this.statusBarProgress = undefined;
+	}
+	setStatus(text, { overview = text, progress = false } = {}) {
+		if (this.stopped) return;
 		if (this.deferBackgroundStatus && [t('msg_4c9b675ab6'), t('overview.scanning')].includes(overview)) {
 			this.backgroundStatus = { text, overview };
 			return;
@@ -2459,9 +2532,26 @@ export default class IndependentSync extends Plugin {
 		window.clearTimeout(this.backgroundStatusTimer);
 		this.deferBackgroundStatus = false;
 		this.backgroundStatus = undefined;
-		if (!this.data?.settings.workspace) text = t(this.data?.lastDeletedWorkspace ? 'notebooks.deletedStatus' : 'sync.notConnected');
-		this.status.setText(text);
-		this.publishOverview(this.data?.settings.workspace ? overview : text);
+		const workspace = this.data?.settings.workspace;
+		if (!workspace) text = t(this.data?.lastDeletedWorkspace ? 'notebooks.deletedStatus' : 'sync.notConnected');
+		if (!progress || !workspace || Platform.isMobile) {
+			this.clearStatusBarProgress();
+			this.writeStatusBar(text);
+		} else if (this.statusBarProgress) {
+			this.statusBarProgress.text = text;
+		} else {
+			const activity = this.cycleActivity;
+			const { localId, settings: { origin } } = this.data;
+			const pending = { text };
+			pending.timer = window.setTimeout(() => {
+				this.statusBarProgress = undefined;
+				if (this.cycleActivity === activity && this.data.localId === localId &&
+					this.data.settings.origin === origin && this.data.settings.workspace === workspace)
+					this.writeStatusBar(pending.text);
+			}, 1000);
+			this.statusBarProgress = pending;
+		}
+		this.publishOverview(workspace ? overview : text);
 	}
 
 	automaticChangesAllowed(sending = false) {
@@ -2595,6 +2685,8 @@ export default class IndependentSync extends Plugin {
 		} catch { this.notify(t('tray.unavailable')); }
 	}
 	onunload() {
+		this.disposeNavigatorMenus?.();
+		this.closeTranslation?.();
 		this.backgroundTray?.dispose();
 		this.backgroundTray = undefined;
 		this.tab?.disposeLegacySettings?.();
@@ -2611,6 +2703,7 @@ export default class IndependentSync extends Plugin {
 		this.detachLinkMaintenanceTimes?.();
 		window.clearTimeout(this.explorerSortTimer);
 		this.stopped = true;
+		this.clearStatusBarProgress();
 		for (const detach of this.explorerSortViews?.values() ?? []) detach();
 		this.explorerSortViews?.clear();
 		this.statusListeners?.clear();
@@ -2727,7 +2820,40 @@ export default class IndependentSync extends Plugin {
 			void save.catch(() => this.notify(t('msg_4439f34880')));
 		}, 100);
 	}
-	async synchronize(retryRow, approval, automatic = false) {
+	canWatchRemote(target) {
+		const settings = this.data.settings;
+		return target && !this.stopped && !this.stopping && !this.connecting && !this.configurationPending && !this.running &&
+			!this.data.manualSyncStopped && settings.autoTimer !== false && settings.autoChanges !== false &&
+			!['send', 'paused'].includes(settings.direction) && !['send', 'paused'].includes(this.lanPeers?.mode) &&
+			globalThis.document?.visibilityState === 'visible' && window.navigator?.onLine !== false && !target.parentSignal.aborted &&
+			target.api.workspace === settings.workspace && target.api.origin === new URL(settings.origin).origin &&
+			target.api.accessKey === this.secret('access');
+	}
+	pollRemoteChanges() {
+		const target = this.remoteWatchTarget;
+		const now = Date.now();
+		const auditDue = now - (this.lastFinished ?? now) >= Math.max(30000, this.data.settings.interval * 1000);
+		if (!this.canWatchRemote(target) || auditDue || now < (this.remoteWatchRetryAt ?? 0)) {
+			this.remoteWatch?.abort();
+			return false;
+		}
+		if (this.remoteWatch) return true;
+		const controller = new AbortController();
+		const scope = cancellationScope([controller.signal, target.parentSignal]);
+		this.remoteWatch = controller;
+		target.api.signal = scope.signal;
+		void target.api.watchChanges(target.cursor, target.pinsCursor).then(changed => {
+			if (!scope.signal.aborted && this.remoteWatchTarget === target && changed && this.canWatchRemote(target))
+				void this.synchronize(undefined, undefined, true, 'watch');
+		}).catch(() => {
+			if (!scope.signal.aborted && this.remoteWatchTarget === target) this.remoteWatchRetryAt = Date.now() + 30000;
+		}).finally(() => {
+			scope.dispose();
+			if (this.remoteWatch === controller) this.remoteWatch = undefined;
+		});
+		return true;
+	}
+	async synchronize(retryRow, approval, automatic = false, trigger = automatic ? 'scheduled' : 'manual') {
 		if (automatic && this.data?.manualSyncStopped) return;
 		if (this.stopped) return;
 		if (this.configurationPending) return;
@@ -2738,7 +2864,12 @@ export default class IndependentSync extends Plugin {
 			this.setStatus(t('sync.notConnected'));
 			return;
 		}
+		this.remoteWatch?.abort();
+		this.remoteWatchTarget = undefined;
 		this.lastStarted = Date.now();
+		const started = performance.now();
+		const timing = { trigger };
+		const mark = stage => { timing[stage] ??= Math.round(performance.now() - started); };
 		const coalesceCycle = automatic && !retryRow && !approval && this.lastQuietCycleAt !== undefined && Date.now() >= this.lastQuietCycleAt && Date.now() - this.lastQuietCycleAt < 60000;
 		this.cycleActivity = { startedAt: this.lastStarted, progressAt: this.lastStarted, stage: 'connecting', stages: {}, changed: false, persisted: !coalesceCycle };
 		this.stageTimer = window.setInterval(() => {
@@ -2784,7 +2915,7 @@ export default class IndependentSync extends Plugin {
 					version: this.manifest.version,
 				});
 				if (!coalesceCycle) await this.persistTasks();
-				const { engine, keys, pinsSupported, positionsSupported } = await this.connection({ allowIdleScan: automatic && !retryRow && !approval });
+				const { engine, keys, pinsSupported, positionsSupported, changeWatch } = await this.connection({ allowIdleScan: automatic && !retryRow && !approval, mark });
 				if (engine.remoteMode === 'paused' || (!approval && engine.direction === 'paused')) {
 					this.journal.update(cycle, { status: 'skipped' });
 					await this.persistTasks();
@@ -2804,6 +2935,7 @@ export default class IndependentSync extends Plugin {
 						throw planChanged();
 				}
 				diagnosticApi = engine.api;
+				const receiveScope = this.taskScope;
 				const files = retries.filter((row) => row.direction !== 'cycle');
 				for (let attempt = 0; ; attempt++) {
 					try {
@@ -2820,6 +2952,7 @@ export default class IndependentSync extends Plugin {
 						this.setStatus(t('sync.changedRetry'), { overview: t('overview.scanning') });
 					}
 				}
+				if (timing.firstReceiveFinishedMs !== undefined) this.lastReceiveTiming = { scope: receiveScope, timing };
 				if (this.pluginStateRestartPending) {
 					this.pluginStateRestartPending = false;
 					this.notify(t('configuration.pluginEnabledRestart'), true);
@@ -2853,6 +2986,15 @@ export default class IndependentSync extends Plugin {
 					this.queueDiagnostic(this.journal.rows.find((row) => row.id === cycle), diagnosticApi);
 					await this.persistTasks();
 					this.lastQuietCycleAt = idle ? Date.now() : undefined;
+				}
+				if (edition.edition === 'cn' && /-alpha\./.test(this.manifest.version) && changeWatch &&
+					!remaining && !waitingForTree && !Object.keys(engine.state.pendingReceives ?? {}).length &&
+					!Object.keys(pins.pending).length && !['paused', 'send'].includes(engine.direction)) {
+					const { origin, accessKey, workspace, fetcher, signal } = engine.api;
+					this.remoteWatchTarget = {
+						api: this.workspaceApi(origin, accessKey, workspace, fetcher), parentSignal: signal,
+						cursor: engine.state.cursor, pinsCursor: pins.cursor,
+					};
 				}
 				this.setStatus(
 					waitingForTree ? t('sync.changedWait') : remaining
@@ -2901,6 +3043,7 @@ export default class IndependentSync extends Plugin {
 			}
 		})().finally(() => {
 			window.clearInterval(this.stageTimer);
+			this.clearStatusBarProgress();
 			this.lastCycleActivity = { ...this.cycleActivity, finishedAt: Date.now() };
 			this.cycleActivity = undefined;
 			window.clearTimeout(this.backgroundStatusTimer);
@@ -2990,9 +3133,11 @@ export default class IndependentSync extends Plugin {
 		});
 	}
 	async signOut() {
+		this.closeTranslation?.();
 		this.billingHandoffCancel?.();this.billingFallbackWindow?.close();this.preparedBillingEntry=undefined;
 		this.accountEmail = '';
 		this.overviewIdentity = undefined;
+		try { this.app.secretStorage?.setSecret(secretStorageId(this, 'overview-display'), ''); } catch { /* The credential binding still protects the cached values. */ }
 		this.lanPeers?.close();
 		this.lanPeers = undefined;
 		this.data.settings.direction = 'paused';
@@ -5247,15 +5392,29 @@ export class IndependentSettings extends PluginSettingTab {
 			`${plugin.data.settings.origin}|${plugin.data.settings.workspace}|${plugin.data.localId}`;
 		const scopeKey = identityScope();
 		const accountConnected = connected || plugin.accountAuthorized === true;
+		const credentialName = connected ? 'access' : 'account';
+		const sameScope = () => !plugin.stopped && identityScope() === scopeKey;
+		const identity = () => {
+			const value = plugin.overviewIdentity;
+			return sameScope() && value?.scope === scopeKey && value.credential === plugin.secret(credentialName) &&
+				value.accountCredential === plugin.secret('account') ? value : undefined;
+		};
 		const status = row(t('sections.status'), (setting) => {
-			let disposed = false;
+			const credential = plugin.secret(credentialName);
+			const accountCredential = plugin.secret('account');
+			const controller = new AbortController();
+			const current = () => !controller.signal.aborted && sameScope() &&
+				credential === plugin.secret(credentialName) && accountCredential === plugin.secret('account');
 			let phase = plugin.overviewStatusText ?? plugin.status.textContent ?? plugin.status.text ?? t('sections.disconnected');
-			let server = t('overview.spaceUnknown'), local = t('overview.spaceUnknown'), sizeLoading = false, lastDescription;
+			let local = t('overview.spaceUnknown'), loading = false, lastDescription;
+			let cacheBinding;
 			const descriptionEl = setting.descEl ?? setting.settingEl?.querySelector('.setting-item-description');
 			const phaseEl = descriptionEl?.createSpan({ cls: 'smart-sync-status-phase' });
 			const spaceEl = descriptionEl?.createSpan({ cls: 'smart-sync-status-storage' });
 			const update = (text) => {
 				phase = text;
+				const bytes = identity()?.logicalBytes;
+				const server = Number.isSafeInteger(bytes) && bytes >= 0 ? formatStorageSize(bytes) : t('overview.spaceUnknown');
 				const description = connected ? t('overview.statusSpace', { state: phase, server, local }) : phase;
 				if (description !== lastDescription) {
 					if (phaseEl && spaceEl) {
@@ -5266,58 +5425,78 @@ export class IndependentSettings extends PluginSettingTab {
 					lastDescription = description;
 				}
 			};
-			const refreshSizes = async () => {
-				if (disposed || sizeLoading || !connected || identityScope() !== scopeKey) return;
-				sizeLoading = true;
-				local = formatStorageSize(plugin.app.vault.getFiles().reduce((sum, file) => sum + (Number.isFinite(file.stat?.size) ? file.stat.size : 0), 0));
-				try {
-					const api = plugin.api();
-					const usage = await api.request('GET', api.scope('usage?summary=1'));
-					if (disposed || identityScope() !== scopeKey) return;
-					server = Number.isSafeInteger(usage.logicalBytes) && usage.logicalBytes >= 0 ? formatStorageSize(usage.logicalBytes) : t('overview.spaceUnknown');
-				} catch { /* Keep the last successful space sample during an outage. */ }
-				finally { sizeLoading = false; }
-				if (!disposed && identityScope() === scopeKey) update(phase);
+			const publish = fields => {
+				plugin.overviewIdentity = { ...fields, scope: scopeKey, credential, accountCredential };
+				for (const listener of plugin.statusListeners ?? []) listener(phase);
 			};
-			let accountLoading = false;
-			const refreshAccount = async () => {
-				if (!accountConnected || accountLoading || disposed || identityScope() !== scopeKey) return;
-				accountLoading = true;
+			const cachedFields = value => ({
+				email: typeof value?.email === 'string' ? value.email : '',
+				label: typeof value?.label === 'string' ? value.label : '',
+				logicalBytes: Number.isSafeInteger(value?.logicalBytes) && value.logicalBytes >= 0 ? value.logicalBytes : undefined,
+			});
+			const persist = fields => {
+				if (!cacheBinding) return;
 				try {
-					const api = connected ? plugin.api() : plugin.workspaceApi(config.origin,plugin.secret('account'));
-					const credential = plugin.secret(connected ? 'access' : 'account');
-					const current = () => !disposed && identityScope() === scopeKey && credential === plugin.secret(connected ? 'access' : 'account');
-					const publish = fields => {
-						if (!current()) return;
-						plugin.overviewIdentity = { ...(plugin.overviewIdentity?.scope === scopeKey ? plugin.overviewIdentity : {}), scope: scopeKey, ...fields };
-						for (const listener of plugin.statusListeners ?? [])
-							listener(plugin.overviewStatusText ?? plugin.status.textContent ?? plugin.status.text ?? t('sections.disconnected'));
-					};
-					await Promise.all([
-						api.request('GET', 'account').then(account => {
+					const saved = JSON.stringify({ binding: cacheBinding, ...fields });
+					if (plugin.secret('overview-display') !== saved)
+						plugin.app.secretStorage?.setSecret(secretStorageId(plugin, 'overview-display'), saved);
+				} catch { /* The in-memory display remains available. */ }
+			};
+			const refresh = async () => {
+				if (!current() || loading || !accountConnected || !credential) return;
+				loading = true;
+				try {
+					if (connected) local = formatStorageSize(plugin.app.vault.getFiles().reduce((sum, file) => sum + (Number.isFinite(file.stat?.size) ? file.stat.size : 0), 0));
+					if (!cacheBinding && plugin.app.secretStorage) {
+						try {
+							cacheBinding = await fingerprint(new TextEncoder().encode(JSON.stringify([scopeKey, credential, accountCredential])));
 							if (!current()) return;
-							const email = typeof account.email === 'string' ? account.email.trim() : '';
-							plugin.accountEmail = email;
-							publish({ email });
-						}).catch(() => {}),
-						connected ? api.info().then(notebook => publish({ label: typeof notebook.label === 'string' ? notebook.label : '' })).catch(() => {}) : Promise.resolve(),
+							const saved = JSON.parse(plugin.secret('overview-display') || 'null');
+							if (!identity() && saved?.binding === cacheBinding) publish(cachedFields(saved));
+						} catch { /* A missing or unreadable cache must not block live requests. */ }
+					}
+					update(phase);
+					const api = plugin.workspaceApi(config.origin, credential, config.workspace);
+					api.signal = controller.signal;
+					const [account, notebook, usage] = await Promise.allSettled([
+						api.request('GET', 'account'),
+						connected ? api.info() : undefined,
+						connected ? api.request('GET', api.scope('usage?summary=1')) : undefined,
 					]);
-				} catch {
-					/* An unavailable account must not block settings or expose raw errors. */
-				} finally { accountLoading = false; }
+					if (!current()) return;
+					const denied = result => result.status === 'rejected' && [401, 403].includes(result.reason?.status);
+					const previous = identity();
+					const fields = cachedFields(previous);
+					if (denied(account)) {
+						Object.assign(fields, cachedFields(undefined));
+					} else {
+						if (account.status === 'fulfilled') fields.email = cachedFields(account.value).email;
+						if (connected) {
+							if (denied(notebook) || notebook.reason?.status === 404) {
+								fields.label = '';
+								fields.logicalBytes = undefined;
+							} else {
+								if (notebook.status === 'fulfilled') fields.label = cachedFields(notebook.value).label;
+								if (denied(usage) || usage.reason?.status === 404) fields.logicalBytes = undefined;
+								else if (usage.status === 'fulfilled') fields.logicalBytes = cachedFields(usage.value).logicalBytes;
+							}
+						}
+					}
+					if (previous || denied(account) || [account, notebook, usage].some(result => result.status === 'fulfilled' && result.value)) {
+						publish(fields);
+						persist(fields);
+					}
+				} catch { /* The next refresh can recover without affecting synchronization. */ }
+				finally { loading = false; }
 			};
-			void refreshAccount();
-			update(phase);
-			void refreshSizes();
-			const sizeTimer = window.setInterval(() => {
-				void refreshSizes();
-				if (!plugin.overviewIdentity?.email || (connected && !plugin.overviewIdentity?.label)) void refreshAccount();
-			}, 30000);
-			plugin.registerInterval(sizeTimer);
 			plugin.statusListeners ??= new Set();
 			plugin.statusListeners.add(update);
+			update(phase);
+			void refresh();
+			const sizeTimer = window.setInterval(() => { void refresh(); }, 30000);
+			plugin.registerInterval(sizeTimer);
 			return () => {
-				disposed = true;
+				controller.abort();
 				window.clearInterval(sizeTimer);
 				plugin.statusListeners.delete(update);
 			};
@@ -5329,12 +5508,10 @@ export class IndependentSettings extends PluginSettingTab {
 					let fullValue;
 					const info = setting.settingEl?.querySelector('.setting-item-info');
 					const update = () => {
-						const identity = plugin.overviewIdentity;
-						fullValue = !plugin.data.settings.workspace
-								? (name === 'overview.account' && plugin.secret('account') ? (plugin.accountEmail || t('notebooks.accountSignedIn')) : t(name === 'overview.account' ? 'overview.signedOut' : 'sync.notConnected'))
-								: identityScope() === scopeKey && identity?.scope === scopeKey && identity[field]
-									? identity[field]
-									: t(fallback);
+						const value = identity()?.[field];
+						fullValue = value || (!plugin.data.settings.workspace
+							? t(name !== 'overview.account' ? 'sync.notConnected' : plugin.secret('account') ? 'notebooks.accountSignedIn' : 'overview.signedOut')
+							: t(fallback));
 						setting.setDesc(fullValue);
 						if (info) info.title = fullValue;
 					};
@@ -5544,6 +5721,12 @@ export class IndependentSettings extends PluginSettingTab {
 						try { await plugin.setting(key, value); }
 						catch { plugin.notify(t('notes.saveFailed')); this.update(); }
 					})))),
+				...((typeof __SMART_SYNC_CN_TRANSLATION__ === 'undefined' ? edition.edition === 'cn' : __SMART_SYNC_CN_TRANSLATION__)
+					? [row('启用翻译功能', setting => setting.setDesc('选中文字后可查词或翻译。')
+						.addToggle(input => input.setValue(config.translationEnabled !== false).onChange(async value => {
+							try { await plugin.setting('translationEnabled', value); }
+							catch { plugin.notify(t('notes.saveFailed')); this.update(); }
+						})))] : []),
 				...(!Platform.isMobile ? [row(t('tray.enabled'), setting => setting
 					.setDesc(t('tray.help'))
 					.addToggle(input => input.setValue(config.backgroundTray !== false).onChange(async value => {

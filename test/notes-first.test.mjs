@@ -20,8 +20,11 @@ function fixture(batch) {
 			assert.equal(entries.findLast(entry => entry.note === note)?.sequence ?? 0, input.expected);
 			const entry = { note, manifest: input.manifest, removed: input.removed, sequence: entries.length + 1 };
 			entries.push(entry);
+			const eventIndex = events.length;
+			events.push(['send']);
 			const info = await inspectNote(keys, workspace, note, input.manifest, address => objects.get(address));
-			events.push(['send', info.path]); return entry;
+			events[eventIndex] = ['send', info.path];
+			return entry;
 		},
 		commitBatch: async inputs => ({ entries: await Promise.all(inputs.map(input => api.commit(input.note, input))) })
 	};
@@ -128,6 +131,60 @@ test('a new local Markdown edit interrupts attachment work at the next file boun
 	const transferred = f.events.filter(([kind]) => ['send', 'receive'].includes(kind));
 	assert.deepEqual(transferred, [['receive', 'first.bin'], ['send', 'new.md'], ['receive', 'second.bin']]);
 	assert.equal(priorities.size, 0); assert.equal(f.times.get('new.md'), mtime + 100);
+});
+
+test('a fast scan with a queued attachment reads the feed once before the attachment phase', async (context) => {
+	context.mock.method(performance, 'now', () => 0);
+	const f = fixture(true);
+	const remote = await f.add('existing.md', 'old');
+	for (let i = 0; i < 12; i++) await f.add(`note-${i}.md`, `body ${i}`);
+	await f.engine({ direction: 'receive' }).run();
+	f.events.length = 0;
+	f.set('edited.bin', 'attachment', mtime + 100);
+	const fileTime = f.host.mtime;
+	f.host.mtime = async path => {
+		if (path === 'note-11.md') await f.add('existing.md', 'new', remote.id);
+		return fileTime(path);
+	};
+	const feed = f.api.feed;
+	let reads = 0;
+	f.api.feed = async after => { reads++; return feed(after); };
+	const priorities = new Map([['edited.bin', 1]]);
+	await f.engine({ batchFiles: 4, contentPriorities: priorities }).run();
+	assert.equal(reads, 2);
+	assert.deepEqual(f.events.filter(([kind]) => ['send', 'receive'].includes(kind)).slice(-2), [
+		['receive', 'existing.md'], ['send', 'edited.bin'],
+	]);
+	assert.deepEqual(f.files.get('existing.md'), bytes('new'));
+	assert.equal(f.times.get('existing.md'), mtime);
+	assert.deepEqual(f.events.filter(([kind]) => kind === 'send').at(-1), ['send', 'edited.bin']);
+	const uploaded = f.entries.at(-1);
+	const metadata = await inspectNote(keys, workspace, uploaded.note, uploaded.manifest, address => f.objects.get(address));
+	assert.equal(metadata.mtime, mtime + 100);
+	assert.equal(priorities.size, 0);
+});
+
+test('a remote Markdown edit still preempts remaining attachments during a fast download', async (context) => {
+	context.mock.method(performance, 'now', () => 0);
+	const f = fixture(true), note = await f.add('existing.md', 'old');
+	await f.engine({ direction: 'receive' }).run();
+	f.events.length = 0;
+	for (const name of ['first.bin', 'second.bin', 'third.bin', 'fourth.bin']) await f.add(name, name);
+	const write = f.host.write;
+	f.host.write = async (path, body, time) => {
+		await write(path, body, time);
+		if (path === 'second.bin') await f.add('existing.md', 'new', note.id);
+	};
+	await f.engine({ direction: 'receive', batchFiles: 1 }).run();
+	assert.deepEqual(f.events.filter(([kind]) => kind === 'receive'), [
+		['receive', 'first.bin'], ['receive', 'second.bin'], ['receive', 'existing.md'],
+		['receive', 'third.bin'], ['receive', 'fourth.bin'],
+	]);
+	assert.deepEqual(f.files.get('existing.md'), bytes('new'));
+	assert.equal(f.times.get('existing.md'), mtime);
+	await f.engine({ direction: 'receive' }).run();
+	assert.equal(f.durable().cursor, 6);
+	assert.deepEqual(f.durable().pendingReceives ?? {}, {});
 });
 
 test('bounded classification reuses verified manifests without a second metadata decryption', async () => {

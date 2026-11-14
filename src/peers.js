@@ -53,11 +53,16 @@ export class LanPeers {
 		this.closed = false;
 		this.cancellation = new AbortController();
 	}
-	async start() {
+	async start({ waitForSignaling = true } = {}) {
 		if (this.closed) return;
 		try {
-			await this.presenceWork;
-			await this.tick();
+			if (waitForSignaling) {
+				await this.presenceWork;
+				await this.tick();
+			} else {
+				const presence = await this.refreshPresence();
+				if (presence) void this.tick(presence).catch(() => this.drop());
+			}
 		} finally {
 			if (!this.timer && !this.closed)
 				this.timer = window.setInterval(
@@ -66,46 +71,57 @@ export class LanPeers {
 				);
 		}
 	}
-	async tick() {
+	async tick(presence) {
 		if (this.closed) return;
 		if (this.presenceWork) return this.presenceWork;
-		const work = this.poll();
+		const work = this.poll(presence);
 		this.presenceWork = work;
 		try { return await work; }
 		finally { if (this.presenceWork === work) this.presenceWork = undefined; }
 	}
-	async poll() {
-		if (this.closed || this.busy) return;
-		this.busy = true;
+	async refreshPresence() {
+		if (this.closed) return;
+		if (this.devicePresenceWork) return this.devicePresenceWork;
+		const work = this.requestPresence();
+		this.devicePresenceWork = work;
+		try { return await work; }
+		finally { if (this.devicePresenceWork === work) this.devicePresenceWork = undefined; }
+	}
+	async requestPresence() {
+		const presence = await this.api.request('POST', 'device-presence', {
+			workspace: this.api.workspace,
+			vaultUsage: this.vaultUsage(this.api),
+		});
+		if (this.closed) return;
+		this.id = presence.id;
+		this.mode = presence.mode;
+		if (!this.canSignal()) this.drop();
+		return presence;
+	}
+	canSignal() {
+		return !this.closed && this.enabled && this.Peer && this.mode === 'both' && !this.api.signal?.aborted;
+	}
+	async poll(presence) {
+		presence ??= await this.refreshPresence();
+		if (!presence || !this.canSignal()) return;
 		try {
-			const presence = await this.api.request('POST', 'device-presence', {
-				workspace: this.api.workspace,
-				vaultUsage: this.vaultUsage(this.api),
-			});
-			if (this.closed) return;
-			this.id = presence.id;
-			this.mode = presence.mode;
-			if (!this.enabled || !this.Peer || presence.mode !== 'both') {
-				this.drop();
-				return;
-			}
 			const available = new Set(presence.peers.map((p) => p.id));
 			for (const id of this.links.keys()) if (!available.has(id)) this.remove(id);
 			for (const [id, link] of this.links)
 				if (link.channel?.readyState !== 'open' && Date.now() - link.created > 15000)
 					this.remove(id);
 			for (const id of [...available].slice(0, 4))
-				if (this.id < id && !this.links.has(id)) {
+				if (this.canSignal() && this.id < id && !this.links.has(id)) {
 					const link = this.connect(id, true);
 					await this.describe(link, 'offer');
 				}
-			for (let pages = 0; pages < 4; pages++) {
+			for (let pages = 0; pages < 4 && this.canSignal(); pages++) {
 				const batch = await this.api.request(
 					'GET',
 					`device-signals?workspace=${this.api.workspace}&after=${this.after}`,
 				);
-				if (this.closed) return;
 				for (const row of batch.entries) {
+					if (!this.canSignal()) return;
 					this.after = Math.max(this.after, row.sequence);
 					if (!available.has(row.sender)) continue;
 					let link = this.links.get(row.sender);
@@ -119,9 +135,7 @@ export class LanPeers {
 				}
 				if (!batch.more) break;
 			}
-		} finally {
-			this.busy = false;
-		}
+		} catch (error) { if (this.canSignal()) throw error; }
 	}
 	connect(id, initiator) {
 		const pc = new this.Peer({ iceServers: [] }),
@@ -151,11 +165,12 @@ export class LanPeers {
 	}
 	async describe(link, type) {
 		const description = await this.negotiate(link, () => type === 'offer' ? link.pc.createOffer() : link.pc.createAnswer());
+		if (this.links.get(link.id) !== link) return;
 		await this.negotiate(link, () => link.pc.setLocalDescription(description));
 		const deadline = Date.now() + 2500;
-		while (link.pc.iceGatheringState !== 'complete' && Date.now() < deadline && !this.closed && !this.api.signal?.aborted)
+		while (link.pc.iceGatheringState !== 'complete' && Date.now() < deadline && this.links.get(link.id) === link && !this.closed && !this.api.signal?.aborted)
 			await delay(25);
-		if (this.closed || this.api.signal?.aborted) return;
+		if (this.closed || this.api.signal?.aborted || this.links.get(link.id) !== link) return;
 		await this.api.request('POST', 'device-signals', {
 			workspace: this.api.workspace,
 			target: link.id,
