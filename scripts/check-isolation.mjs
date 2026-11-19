@@ -6,6 +6,8 @@ const folder = selected ? `artifacts/${selected}` : 'artifacts';
 const metadata = JSON.parse(await readFile(`${folder}/dependency-map.json`, 'utf8'));
 const expected = [
 	'src/edition.js',
+	'src/epub.js',
+	'src/epub-view.js',
 	'src/android-transport.js',
 	'src/billing.js',
 	'src/client.js',

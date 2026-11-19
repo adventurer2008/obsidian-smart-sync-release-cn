@@ -8,6 +8,7 @@ import { notePinState, queueNotePosition, moveNotePins, pinPathSet, synchronizeN
 import { registerNoteSearch } from './search.js';
 import { registerNoteEncryption } from './note-encryption.js';
 import { registerNoteTranslation } from './translation.js';
+import { registerEpubReader } from './epub-view.js';
 /* global __SMART_SYNC_CN_TRANSLATION__ -- injected by the regional build. */
 import {
 	ItemView,
@@ -780,6 +781,7 @@ export default class IndependentSync extends Plugin {
 			}
 		this.logViews = new Set();
 		registerNoteSearch(this);
+		registerEpubReader(this);
 		let translation;
 		if (typeof __SMART_SYNC_CN_TRANSLATION__ === 'undefined' ? edition.edition === 'cn' : __SMART_SYNC_CN_TRANSLATION__) {
 			translation = registerNoteTranslation(this);
