@@ -12,6 +12,7 @@ import { freshSalt, packNote, unlockWorkspace } from '../src/codec.js';
 import { blankDocx, checkDocxImages, checkDocxRoundTrip, docxName, inspectDocx } from '../src/docx.js';
 import { createDocxProtection, isPasswordDocx, openPasswordDocx } from '../src/docx-password.js';
 import { NotebookSynchronizer, emptyState } from '../src/synchronizer.js';
+import { pendingWordSave, registerWordSyncState } from '../src/word-coordination.js';
 
 test('a new DOCX has a portable name, an empty body and no filename inserted into the body', () => {
 	const { window } = new JSDOM();
@@ -52,6 +53,7 @@ test('Word password derivation does not depend on background renderer timers', a
 });
 
 const sdk = `
+export class Plugin { constructor(app) { this.app = app; } }
 export class TFolder { isRoot() { return this.path === ''; } }
 export class TFile {}
 export const Platform = { isMobile: false };
@@ -82,7 +84,7 @@ const hook = registerHooks({ resolve(specifier, context, next) {
 	return specifier === 'obsidian' ? { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true } : next(specifier, context);
 } });
 const { TFile, TFolder } = await import('obsidian');
-const { registerDocxEditor } = await import('../src/docx-view.js');
+const { default: WordPlugin } = await import('../src/word-plugin.js');
 hook.deregister();
 
 async function waitFor(check) {
@@ -144,7 +146,9 @@ test('DOCX editor autosaves, preserves images and conflicts, and saves password-
 	element.setText = function (text) { this.textContent = text; };
 	element.empty = function () { this.replaceChildren(); };
 
-	let file, bytes, writes = 0, create;
+	let file, bytes, writes = 0, create, navigatorFolderMenu;
+	const firstWrite = Promise.withResolvers();
+	t.after(() => firstWrite.resolve());
 	const events = new Map();
 	const folder = Object.assign(new TFolder(), { path: 'Projects' });
 	const leaf = {
@@ -165,20 +169,26 @@ test('DOCX editor autosaves, preserves images and conflicts, and saves password-
 		readBinary: async () => bytes.slice(0),
 		modifyBinary: async (changed, content, options) => {
 			assert.equal(changed, file);
+			if (!writes) await firstWrite.promise;
 			bytes = content;
 			file.stat = { size: bytes.byteLength, mtime: options?.mtime ?? 456 };
 			writes++;
 		},
 	};
 	const workspace = { getLeaf: () => leaf, getLeavesOfType: () => [leaf], revealLeaf() {},
-		on(name, listener) { events.set(name, listener); }, onLayoutReady: callback => callback() };
-	const owner = {
-		app: { document, workspace, vault }, data: { settings: { workspace: 'connected-word-fixture' } }, register() {}, registerEvent() {}, addCommand() {},
+		on(name, listener) { events.set(name, listener); }, trigger(name, ...args) { events.get(name)?.(...args); }, onLayoutReady: callback => callback() };
+	const syncOwner = { separateWordEditor: true, app: { workspace }, registerEvent() {} };
+	registerWordSyncState(syncOwner);
+	const plugins = { 'wujie-sync': syncOwner, 'notebook-navigator': { api: { menus: {
+		registerFolderMenu(callback) { navigatorFolderMenu = callback; },
+	} } } };
+	const owner = Object.assign(new WordPlugin({ document, workspace, vault, plugins: { plugins } }), {
+		register() {}, registerEvent() {}, addCommand() {},
 		registerExtensions(extensions) { assert.deepEqual(extensions, ['docx']); },
-		registerView(type, factory) { leaf.view = view = factory(leaf); },
-	};
-	registerDocxEditor(owner);
-	events.get('file-menu')({ addItem: callback => callback({ setTitle() { return this; }, setIcon() { return this; }, onClick(action) { create = action; } }) }, folder);
+		registerView(type, factory) { assert.equal(type, 'wujie-word-docx'); leaf.view = view = factory(leaf); },
+	});
+	owner.onload();
+	navigatorFolderMenu({ folder, addItem: callback => callback({ setTitle() { return this; }, setIcon() { return this; }, onClick(action) { create = action; } }) });
 	create();
 	const form = document.querySelector('form');
 	form.querySelector('input').value = '项目计划';
@@ -199,7 +209,12 @@ test('DOCX editor autosaves, preserves images and conflicts, and saves password-
 	const current = editor.querySelector('p') ?? editor;
 	current.textContent = 'Edited in Obsidian';
 	await waitFor(() => !save.disabled);
+	const pending = await waitFor(() => pendingWordSave(workspace) && { promise: pendingWordSave(workspace) });
+	assert.equal(writes, 0, 'The synchronization component can observe an unfinished Word save');
+	firstWrite.resolve();
+	await pending.promise;
 	await waitFor(() => writes === 1 && save.disabled);
+	assert.equal(pendingWordSave(workspace), undefined);
 	const saved = inspectDocx(bytes, window.DOMParser);
 	assert.match(saved.xml.get('word/document.xml').documentElement.textContent, /Edited in Obsidian/u);
 	assert.equal(file.stat.mtime, 456);

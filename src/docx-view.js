@@ -6,7 +6,7 @@ import {
 import { edition } from './edition.js';
 import { locale, t } from './i18n.js';
 
-const viewType = `${edition.id}-docx`;
+const bundledViewType = `${edition.id}-docx`;
 const autosaveDelay = 600;
 const busyRetryDelay = 1500;
 const isDocx = file => file instanceof Obsidian.TFile && /\.docx$/iu.test(file.path);
@@ -54,7 +54,7 @@ function fitMobilePages(target, ref) {
 	};
 }
 
-export function registerDocxEditor(owner) {
+export function registerDocxEditor(owner, { syncActive = () => Boolean(owner.running), viewType = bundledViewType, openLabel = t('docx.open') } = {}) {
 	const { EditableFileView, FuzzySuggestModal, Modal, Notice, Platform, TFolder } = Obsidian;
 	const { vault, workspace } = owner.app;
 	if (!EditableFileView || !vault.readBinary || !vault.createBinary || !vault.modifyBinary || !workspace.getLeaf) return;
@@ -180,7 +180,7 @@ export function registerDocxEditor(owner) {
 		generation = 0;
 		getViewType() { return viewType; }
 		getIcon() { return 'file-text'; }
-		getDisplayText() { return this.file?.basename ?? t('docx.open'); }
+		getDisplayText() { return this.file?.basename ?? openLabel; }
 		canAcceptExtension(extension) { return extension.toLowerCase() === 'docx'; }
 		requestProtection() {
 			const session = this.session;
@@ -268,7 +268,7 @@ export function registerDocxEditor(owner) {
 				const updateSave = () => { save.disabled = !session.ready || inspection.readOnly || Boolean(session.saving || session.protecting) || !dirty(); };
 				const updateProtection = () => protect.setText(t(session.protection ? 'encryption.text36' : 'docx.protect'));
 				const writeDisk = async (output, preserveTime) => {
-					if (owner.running || owner.docxWrite) throw Error('busy');
+					if (syncActive() || owner.docxWrite) throw Error('busy');
 					const path = file.path;
 					const write = async () => {
 						if (vault.getAbstractFileByPath(path) !== file || file.stat.size !== session.disk.byteLength)
@@ -282,7 +282,7 @@ export function registerDocxEditor(owner) {
 							finally { session.writing = false; }
 						}
 					};
-					const pending = write();
+					const pending = Promise.resolve().then(write);
 					owner.docxWrite = pending;
 					try { await pending; }
 					finally { if (owner.docxWrite === pending) owner.docxWrite = undefined; }
@@ -477,7 +477,7 @@ export function registerDocxEditor(owner) {
 	const addFileMenu = (menu, file) => {
 		if (file instanceof TFolder) menu.addItem(item => item.setTitle(t('docx.new')).setIcon('file-plus').onClick(() => create(file)));
 		if (isDocx(file)) {
-			menu.addItem(item => item.setTitle(t('docx.open')).setIcon('file-text').onClick(() => open(file)));
+			menu.addItem(item => item.setTitle(openLabel).setIcon('file-text').onClick(() => open(file)));
 			if (canProtect) menu.addItem(item => item.setTitle(t('encryption.text11')).setIcon('lock').onClick(() => open(file, true)));
 		}
 	};
@@ -489,7 +489,7 @@ export function registerDocxEditor(owner) {
 		onChooseItem(file) { void open(file); }
 	}
 	let picker;
-	owner.addCommand({ id: 'open-word-document', name: t('docx.open'), callback() {
+	owner.addCommand({ id: 'open-word-document', name: openLabel, callback() {
 		picker?.close();
 		picker = new DocxPicker(owner.app);
 		picker.setPlaceholder(t('docx.find'));

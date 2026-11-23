@@ -1,0 +1,9 @@
+{
+  "id": "wujie-word",
+  "name": "Wujie Word Editor",
+  "version": "1.0.0",
+  "minAppVersion": "1.12.7",
+  "description": "Open and edit Word documents with local image insertion, autosave, and password protection.",
+  "author": "lihy",
+  "isDesktopOnly": false
+}

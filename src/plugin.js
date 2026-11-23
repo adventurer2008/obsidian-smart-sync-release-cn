@@ -9,7 +9,7 @@ import { registerNoteSearch } from './search.js';
 import { registerNoteEncryption } from './note-encryption.js';
 import { registerNoteTranslation } from './translation.js';
 import { registerEpubReader } from './epub-view.js';
-import { registerDocxEditor } from './docx-view.js';
+import { pendingWordSave, registerWordSyncState } from './word-coordination.js';
 /* global __SMART_SYNC_CN_TRANSLATION__ -- injected by the regional build. */
 import {
 	ItemView,
@@ -783,7 +783,13 @@ export default class IndependentSync extends Plugin {
 		this.logViews = new Set();
 		registerNoteSearch(this);
 		const addEpubMenu = registerEpubReader(this);
-		const addDocxMenu = registerDocxEditor(this);
+		let addDocxMenu;
+		if (typeof __SMART_SYNC_BUNDLED_WORD__ === 'undefined' || __SMART_SYNC_BUNDLED_WORD__) {
+			addDocxMenu = (await import('./docx-view.js')).registerDocxEditor(this);
+		} else {
+			this.separateWordEditor = true;
+			registerWordSyncState(this);
+		}
 		let translation;
 		if (typeof __SMART_SYNC_CN_TRANSLATION__ === 'undefined' ? edition.edition === 'cn' : __SMART_SYNC_CN_TRANSLATION__) {
 			translation = registerNoteTranslation(this);
@@ -2899,9 +2905,10 @@ export default class IndependentSync extends Plugin {
 		if (this.stopping) return;
 		if (this.connecting) return;
 		if (this.running) return this.running;
-		if (this.docxWrite) {
-			await this.docxWrite.catch(() => {});
-			return this.synchronize(retryRow, approval, automatic);
+		const wordWrite = this.docxWrite ?? (this.separateWordEditor ? pendingWordSave(this.app.workspace) : undefined);
+		if (wordWrite) {
+			await wordWrite.catch(() => {});
+			return this.synchronize(retryRow, approval, automatic, trigger);
 		}
 		if (!this.data.settings.workspace) {
 			this.setStatus(t('sync.notConnected'));

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-smart-client",
-  "version": "1.1.10",
+  "version": "1.1.11",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -12,9 +12,10 @@
     "build": "node scripts/community-build.mjs",
     "build:cn": "node scripts/build.mjs --edition=cn",
     "build:global": "node scripts/build.mjs --edition=global",
+    "build:word": "node scripts/build.mjs --edition=word",
     "build:all": "node scripts/build.mjs --all",
     "check:isolation": "node scripts/check-isolation.mjs",
-    "check:editions": "node scripts/check-isolation.mjs cn && node scripts/check-isolation.mjs global",
+    "check:editions": "node scripts/check-isolation.mjs cn && node scripts/check-isolation.mjs global && node scripts/check-isolation.mjs word",
     "check:community": "node tools/community-lint/run.mjs cn"
   },
   "devDependencies": {

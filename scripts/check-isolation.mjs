@@ -2,24 +2,29 @@ import { readFile } from 'node:fs/promises';
 import { bundledEditorPackage } from './docx-dependencies.mjs';
 
 const selected = process.argv[2];
-if (selected && !['cn', 'global'].includes(selected)) throw Error('Unknown edition');
+if (selected && !['cn', 'global', 'word'].includes(selected)) throw Error('Unknown edition');
 const folder = selected ? `artifacts/${selected}` : 'artifacts';
 const metadata = JSON.parse(await readFile(`${folder}/dependency-map.json`, 'utf8'));
-const expected = [
+const editorInputs = [
+	'src/docx.js', 'src/docx-drop.js', 'src/docx-password.js', 'src/docx-view.js', 'scripts/docx-browser-node-api.cjs',
+];
+const shared = [
 	'src/edition.js',
 	'src/epub.js',
+	'src/i18n.js',
+	'src/locales/catalogs.js',
+	'src/word-coordination.js',
+	'node_modules/fflate/esm/browser.js',
+];
+const expected = selected === 'word' ? [...shared, ...editorInputs, 'src/word-plugin.js'] : [
+	...shared,
+	...(selected === 'cn' ? [] : editorInputs),
 	'src/epub-view.js',
-	'src/docx.js',
-	'src/docx-drop.js',
-	'src/docx-password.js',
-	'src/docx-view.js',
-	'scripts/docx-browser-node-api.cjs',
 	'src/android-transport.js',
 	'src/billing.js',
 	'src/client.js',
 	'src/compatibility.js',
 	'node_modules/@noble/ed25519/index.js',
-	'node_modules/fflate/esm/browser.js',
 	'src/checkpoint.js',
 	'src/codec.js',
 	'src/configuration.js',
@@ -37,8 +42,6 @@ const expected = [
 	'src/recovery.js',
 	'src/synchronizer.js',
 	'src/tasks.js',
-	'src/i18n.js',
-	'src/locales/catalogs.js',
 	'src/planning.js',
 	'src/desktop.js',
 	'src/background-tray.js',
@@ -48,8 +51,10 @@ const expected = [
 ];
 if (selected) expected.push('<define:__SMART_SYNC_EDITION__>');
 // esbuild records the guarded China module and may retain its host imports in Global.
-expected.push('src/translation.js');
+if (selected !== 'word') expected.push('src/translation.js');
 expected.sort();
+if (selected === 'cn' && Object.keys(metadata.inputs).some(input => /\/node_modules\/(?:@eigenpal|jszip|pizzip)\//u.test('/' + input)))
+	throw Error('The synchronization release includes a Word editor archive dependency');
 const actual = Object.keys(metadata.inputs).filter(input => !bundledEditorPackage(input)).sort();
 if (JSON.stringify(actual) !== JSON.stringify(expected))
 	throw new Error(`Unexpected source dependency: ${actual.join(', ')}`);
@@ -62,9 +67,9 @@ if (selected) {
 }
 if (imports.some((entry) => !entry.external || !['obsidian', '@codemirror/state', '@codemirror/view'].includes(entry.path)))
 	throw new Error('Unexpected bundled or runtime dependency');
-const manifest = JSON.parse(await readFile('manifest.json', 'utf8'));
+const manifest = JSON.parse(await readFile(selected === 'word' ? 'manifest.word.json' : 'manifest.json', 'utf8'));
 const built = JSON.parse(await readFile(`${folder}/manifest.json`, 'utf8'));
-if (selected) {
+if (selected && selected !== 'word') {
  const { loadEdition } = await import('./edition-config.mjs');
  const config = await loadEdition(selected);
  Object.assign(manifest, { id: config.id, name: config.name });

@@ -6,8 +6,8 @@ import { parse } from 'rrweb-cssom';
 import { docxBrowserCompatibility, editorLicenseNotices } from './docx-dependencies.mjs';
 
 const args = process.argv.slice(2);
-if (args.length > 1 || args.some(value => !['--edition=cn', '--edition=global', '--all'].includes(value))) throw Error('Use --edition=cn, --edition=global or --all');
-const selections = args[0] === '--all' ? ['cn', 'global'] : args.length ? [args[0].split('=')[1]] : [null];
+if (args.length > 1 || args.some(value => !['--edition=cn', '--edition=global', '--edition=word', '--all'].includes(value))) throw Error('Use --edition=cn, --edition=global, --edition=word or --all');
+const selections = args[0] === '--all' ? ['cn', 'global', 'word'] : args.length ? [args[0].split('=')[1]] : [null];
 const license = (await readFile('LICENSE', 'utf8')).replaceAll('\r\n', '\n');
 const logo = (await readFile('assets/boundless-sync.png')).toString('base64');
 const dependencyNotices = (await readFile('THIRD-PARTY-NOTICES.md', 'utf8')).replaceAll(
@@ -17,7 +17,7 @@ const dependencyNotices = (await readFile('THIRD-PARTY-NOTICES.md', 'utf8')).rep
 const trayLogoPath = 'assets/boundless-sync-tray.png';
 const trayLogo = (await readFile(trayLogoPath)).toString('base64');
 const docxStylesPath = 'node_modules/@eigenpal/docx-editor-react/dist/styles.css';
-const docxStyles = await readFile(docxStylesPath, 'utf8');
+const wordStylesPath = 'styles-word.css';
 function scopedDocxStyles(source) {
 	const sheet = parse(source.replace(/(@keyframes\s+|animation-name:\s*)(enter|exit)\b/gu, '$1smart-sync-docx-$2'));
 	const scope = rules => {
@@ -33,24 +33,29 @@ function scopedDocxStyles(source) {
 	return sheet.toString();
 }
 for (const selected of selections) {
-const config = selected ? await loadEdition(selected) : null;
+const word = selected === 'word';
+const bundledWord = selected !== 'cn';
+const region = word ? 'cn' : selected;
+const config = region ? await loadEdition(region) : null;
+const runtimeEdition = word ? { edition: 'cn', id: 'wujie-word', locale: 'zh-CN' } : config;
 const output = selected ? `artifacts/${selected}` : 'artifacts';
 await mkdir(output, { recursive: true });
 const result = await build({
-	entryPoints: ['src/plugin.js'],
+	entryPoints: [word ? 'src/word-plugin.js' : 'src/plugin.js'],
 	bundle: true,
 	preserveSymlinks: true,
 	format: 'cjs',
 	platform: 'browser',
 	target: ['es2022', 'safari15.4'],
 	external: ['obsidian', '@codemirror/state', '@codemirror/view'],
-	plugins: [docxBrowserCompatibility()],
+	plugins: bundledWord ? [docxBrowserCompatibility()] : [],
 	outfile: `${output}/main.js`,
 	define: {
         __SMART_SYNC_GLOBAL_UI__: JSON.stringify(config?.edition === 'global'),
         __SMART_SYNC_CN_TRANSLATION__: JSON.stringify(config?.edition !== 'global'),
-		...(config ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...config, development: false }) } : {}),
+		...(runtimeEdition ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...runtimeEdition, development: false }) } : {}),
 		__SMART_SYNC_TRAY_LOGO__: JSON.stringify(`data:image/png;base64,${trayLogo}`),
+		__SMART_SYNC_BUNDLED_WORD__: JSON.stringify(bundledWord),
 	},
 	minify: true,
 	metafile: true,
@@ -67,18 +72,24 @@ if (Buffer.byteLength(main) > 5_000_000) throw Error('The plugin bundle exceeds 
 await writeFile(mainPath, main);
 await writeFile(`${output}/dependency-map.json`, JSON.stringify(result.metafile, null, 2));
 if (config) {
- const manifest = JSON.parse(await readFile('manifest.json', 'utf8'));
- Object.assign(manifest, { id: config.id, name: config.name });
+ const manifest = JSON.parse(await readFile(word ? 'manifest.word.json' : 'manifest.json', 'utf8'));
+ if (!word) Object.assign(manifest, { id: config.id, name: config.name });
  await writeFile(`${output}/manifest.json`, JSON.stringify(manifest, null, 2) + '\n');
- await writeFile(`${output}/edition.json`, JSON.stringify(config, null, 2) + '\n');
+ if (!word) await writeFile(`${output}/edition.json`, JSON.stringify(config, null, 2) + '\n');
 } else await copyFile('manifest.json', `${output}/manifest.json`);
-const styles = (await readFile('source-styles.css', 'utf8')).replace("./assets/boundless-sync.png", `data:image/png;base64,${logo}`);
-await writeFile(`${output}/styles.css`, styles + '\n' + scopedDocxStyles(bundledStyles + '\n' + docxStyles));
+let styles = word ? '' : (await readFile('source-styles.css', 'utf8')).replace("./assets/boundless-sync.png", `data:image/png;base64,${logo}`);
+if (bundledWord) {
+ const docxStyles = await readFile(docxStylesPath, 'utf8');
+ styles += await readFile(wordStylesPath, 'utf8') + '\n' + scopedDocxStyles(bundledStyles + '\n' + docxStyles);
+}
+await writeFile(`${output}/styles.css`, styles);
 if (config) {
  const sha = bytes => createHash('sha256').update(bytes).digest('hex');
  const inputs = {};
- const paths = [...Object.keys(result.metafile.inputs).filter(path => path !== '<define:__SMART_SYNC_EDITION__>'), 'scripts/build.mjs', 'scripts/edition-config.mjs', `editions/${selected}.json`, 'manifest.json', 'package.json', 'package-lock.json', 'source-styles.css', 'assets/boundless-sync.png', trayLogoPath, 'LICENSE', 'THIRD-PARTY-NOTICES.md'];
- for (const path of [...new Set([...paths, docxStylesPath, 'scripts/docx-dependencies.mjs', ...editorLicenses.files])].sort()) inputs[path] = sha(await readFile(path));
+ const paths = [...Object.keys(result.metafile.inputs).filter(path => path !== '<define:__SMART_SYNC_EDITION__>'), 'scripts/build.mjs', 'scripts/edition-config.mjs', `editions/${region}.json`, word ? 'manifest.word.json' : 'manifest.json', 'package.json', 'package-lock.json', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'scripts/docx-dependencies.mjs'];
+ if (!word) paths.push('styles.css', 'assets/boundless-sync.png', trayLogoPath);
+ if (bundledWord) paths.push(wordStylesPath, docxStylesPath);
+ for (const path of [...new Set([...paths, ...editorLicenses.files])].sort()) inputs[path] = sha(await readFile(path));
  const files = {};
  for (const part of ['main.js', 'manifest.json', 'styles.css']) files[part] = sha(await readFile(`${output}/${part}`));
  const receipt = { format: 'smart-sync-build-1', edition: selected, inputs, files };
