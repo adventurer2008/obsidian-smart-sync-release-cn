@@ -1,3 +1,5 @@
+import { build } from 'esbuild';
+import { docxBrowserCompatibility } from '../scripts/docx-dependencies.mjs';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { writeFile } from 'node:fs/promises';
@@ -68,7 +70,15 @@ export class EditableFileView {
 	registerEvent() {}
 }
 `;
+const { outputFiles } = await build({
+	stdin: { contents: "export { default } from 'jszip';", resolveDir: import.meta.dirname + '/..' },
+	bundle: true, platform: 'browser', format: 'esm', write: false, plugins: [docxBrowserCompatibility()],
+});
+assert.doesNotMatch(outputFiles[0].text, /\.createElement\(\s*["']script["']\s*\)/u);
+const browserZip = 'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64');
+
 const hook = registerHooks({ resolve(specifier, context, next) {
+	if (specifier === 'jszip') return { url: browserZip, shortCircuit: true };
 	return specifier === 'obsidian' ? { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true } : next(specifier, context);
 } });
 const { TFile, TFolder } = await import('obsidian');

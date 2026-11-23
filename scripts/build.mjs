@@ -2,9 +2,8 @@ import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { loadEdition } from './edition-config.mjs';
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
 import { parse } from 'rrweb-cssom';
-import { editorLicenseNotices } from './docx-dependencies.mjs';
+import { docxBrowserCompatibility, editorLicenseNotices } from './docx-dependencies.mjs';
 
 const args = process.argv.slice(2);
 if (args.length > 1 || args.some(value => !['--edition=cn', '--edition=global', '--all'].includes(value))) throw Error('Use --edition=cn, --edition=global or --all');
@@ -15,6 +14,8 @@ const dependencyNotices = (await readFile('THIRD-PARTY-NOTICES.md', 'utf8')).rep
 	'\r\n',
 	'\n',
 );
+const trayLogoPath = 'assets/boundless-sync-tray.png';
+const trayLogo = (await readFile(trayLogoPath)).toString('base64');
 const docxStylesPath = 'node_modules/@eigenpal/docx-editor-react/dist/styles.css';
 const docxStyles = await readFile(docxStylesPath, 'utf8');
 function scopedDocxStyles(source) {
@@ -43,23 +44,13 @@ const result = await build({
 	platform: 'browser',
 	target: ['es2022', 'safari15.4'],
 	external: ['obsidian', '@codemirror/state', '@codemirror/view'],
-	plugins: [{
-		name: 'docx-browser-node-api',
-		setup(build) {
-			build.onResolve({ filter: /^(?:stream|fs)$/ }, ({ importer, path }) => {
-				const source = importer.replaceAll('\\', '/');
-				if (path === 'stream' && source.endsWith('/node_modules/sax/lib/sax.js') ||
-					path === 'fs' && source.endsWith('/node_modules/cfb/cfb.js'))
-					return { path: resolve('scripts/docx-browser-node-api.cjs') };
-			});
-		},
-	}],
+	plugins: [docxBrowserCompatibility()],
 	outfile: `${output}/main.js`,
 	define: {
         __SMART_SYNC_GLOBAL_UI__: JSON.stringify(config?.edition === 'global'),
         __SMART_SYNC_CN_TRANSLATION__: JSON.stringify(config?.edition !== 'global'),
 		...(config ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...config, development: false }) } : {}),
-		__SMART_SYNC_TRAY_LOGO__: JSON.stringify(`data:image/png;base64,${logo}`),
+		__SMART_SYNC_TRAY_LOGO__: JSON.stringify(`data:image/png;base64,${trayLogo}`),
 	},
 	minify: true,
 	metafile: true,
@@ -69,8 +60,11 @@ const result = await build({
 const editorLicenses = await editorLicenseNotices(Object.keys(result.metafile.inputs));
 const mainPath = `${output}/main.js`;
 const bundledScript = result.outputFiles.find(file => file.path.endsWith('main.js')).text;
+if (/\.createElement\(\s*["']script["']\s*\)/u.test(bundledScript)) throw Error('The plugin bundle must not create script elements at runtime');
 const bundledStyles = result.outputFiles.find(file => file.path.endsWith('main.css'))?.text ?? '';
-await writeFile(mainPath, '/* Bundled editor dependency licenses\n' + editorLicenses.text.replaceAll('*/', '* /') + '\n*/\n' + bundledScript);
+const main = '/* Bundled editor dependency licenses\n' + editorLicenses.text.replaceAll('*/', '* /') + '\n*/\n' + bundledScript;
+if (Buffer.byteLength(main) > 5_000_000) throw Error('The plugin bundle exceeds 5 MB');
+await writeFile(mainPath, main);
 await writeFile(`${output}/dependency-map.json`, JSON.stringify(result.metafile, null, 2));
 if (config) {
  const manifest = JSON.parse(await readFile('manifest.json', 'utf8'));
@@ -83,7 +77,7 @@ await writeFile(`${output}/styles.css`, styles + '\n' + scopedDocxStyles(bundled
 if (config) {
  const sha = bytes => createHash('sha256').update(bytes).digest('hex');
  const inputs = {};
- const paths = [...Object.keys(result.metafile.inputs).filter(path => path !== '<define:__SMART_SYNC_EDITION__>'), 'scripts/build.mjs', 'scripts/edition-config.mjs', `editions/${selected}.json`, 'manifest.json', 'package.json', 'package-lock.json', 'source-styles.css', 'assets/boundless-sync.png', 'LICENSE', 'THIRD-PARTY-NOTICES.md'];
+ const paths = [...Object.keys(result.metafile.inputs).filter(path => path !== '<define:__SMART_SYNC_EDITION__>'), 'scripts/build.mjs', 'scripts/edition-config.mjs', `editions/${selected}.json`, 'manifest.json', 'package.json', 'package-lock.json', 'source-styles.css', 'assets/boundless-sync.png', trayLogoPath, 'LICENSE', 'THIRD-PARTY-NOTICES.md'];
  for (const path of [...new Set([...paths, docxStylesPath, 'scripts/docx-dependencies.mjs', ...editorLicenses.files])].sort()) inputs[path] = sha(await readFile(path));
  const files = {};
  for (const part of ['main.js', 'manifest.json', 'styles.css']) files[part] = sha(await readFile(`${output}/${part}`));

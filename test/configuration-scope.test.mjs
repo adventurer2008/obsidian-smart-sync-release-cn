@@ -129,7 +129,7 @@ test('product language catalogs contain no development-stage test-vault prompts'
 	assert.equal(t('version.value', { version: '0.1.12' }), '当前版本 0.1.12');
 });
 
-test('startup preferences and sync identities cannot be transferred by plugin-data sync across desktop or mobile scopes', () => {
+test('startup preferences and sync identities cannot be transferred by plugin-data sync across desktop or mobile scopes', async () => {
 	for (const ownId of ['wujie-sync', 'smart-sync-global']) for (const mobile of [false, true]) {
 		const scope = configurationScope({ plugins:'all', pluginCode:true, pluginData:true, ownId, mobile });
 		for (const id of ['wujie-sync','smart-sync-global']) {
@@ -137,6 +137,14 @@ test('startup preferences and sync identities cannot be transferred by plugin-da
 			assert.equal(scope.allowed(`plugins/${id}/main.js`),false);
 		}
 		assert.equal(scope.allowed('plugins/synthetic-other/data.json'),true);
+		const adapter = { writeBinary() { assert.fail('A protected plugin must never reach the vault adapter'); } };
+		const host = configurationHost({ adapter, configDir: '.obsidian' }, {}, scope);
+		const prefix = scope.encode('plugins/synthetic-other/main.js').split('/plugins/')[0];
+		for (const id of ['wujie-sync', 'smart-sync-global']) {
+			for (const part of ['main.js', 'manifest.json', 'styles.css', 'data.json']) {
+				await assert.rejects(host.write(prefix + '/plugins/' + id + '/' + part, new Uint8Array([1]), 123), /excluded/u);
+			}
+		}
 	}
 });
 
