@@ -1,5 +1,7 @@
 # 无界同步（Wujie Sync）国内版
 
+Wujie Sync is an Obsidian plugin for users in China. It synchronizes notes and attachments across devices with client-side encryption. The plugin also supports password-protected notes and editing Word documents (.docx) inside Obsidian.
+
 面向中国用户的 Obsidian 同步插件。插件 ID：`wujie-sync`。本仓库提供国内版源码快照、安装包、使用说明及更新记录。
 
 当前版本：**1.1.9**（2026-11-23，正式版）。改进同步稳定性、空冲突目录清理、文档编辑与笔记附件保护。
