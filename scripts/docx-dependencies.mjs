@@ -1,4 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 const packages = new Set(`
 @eigenpal/docx-editor-agents @eigenpal/docx-editor-core @eigenpal/docx-editor-i18n @eigenpal/docx-editor-react
@@ -9,7 +10,7 @@ const packages = new Set(`
 @radix-ui/react-portal @radix-ui/react-presence @radix-ui/react-primitive @radix-ui/react-select @radix-ui/react-slot
 @radix-ui/react-use-callback-ref @radix-ui/react-use-controllable-state @radix-ui/react-use-effect-event
 @radix-ui/react-use-layout-effect @radix-ui/react-use-size @radix-ui/react-visually-hidden
-@xmldom/xmldom aria-hidden clsx detect-node-es docxtemplater dompurify get-nonce jszip orderedmap pizzip
+@xmldom/xmldom aria-hidden clsx detect-node-es docxtemplater dompurify get-nonce jszip orderedmap pako pizzip
 @noble/hashes adler-32 crc-32 cfb
 prosemirror-commands prosemirror-dropcursor prosemirror-history prosemirror-keymap prosemirror-model
 prosemirror-state prosemirror-tables prosemirror-transform prosemirror-view react react-dom react-remove-scroll
@@ -45,4 +46,32 @@ export async function editorLicenseNotices(inputs) {
 		notices.push(`${name} ${version} (${license})\n` + (await Promise.all(paths.map(path => readFile(path, 'utf8')))).join('\n'));
 	}
 	return { files, text: notices.join('\n\n') };
+}
+
+export function docxBrowserCompatibility() {
+	return {
+		name: 'docx-browser-compatibility',
+		setup(build) {
+			// The prebuilt browser distribution includes IE script-based scheduling.
+			// Bundle JSZip's source against the native Promise and timers in supported hosts.
+			build.onResolve({ filter: /^jszip$/ }, () => ({ path: resolve('node_modules/jszip/lib/index.js') }));
+			build.onLoad({ filter: /[\\/]jszip[\\/]lib[\\/](?:utils|external)\.js$/ }, async ({ path }) => {
+				const source = await readFile(path, 'utf8');
+				const external = /[\\/]external\.js$/u.test(path);
+				if (external) {
+					if (!source.includes('ES6Promise = require("lie")')) throw Error('Review the updated JSZip Promise adapter');
+					return { contents: 'module.exports = { Promise };' };
+				}
+				if (!source.includes('require("setimmediate");') || !source.includes('    setImmediate(function () {'))
+					throw Error('Review the updated JSZip scheduler');
+				return { contents: source.replace('require("setimmediate");', '').replace('    setImmediate(function () {', '    setTimeout(function () {') };
+			});
+			build.onResolve({ filter: /^(?:stream|fs)$/ }, ({ importer, path }) => {
+				const source = importer.replaceAll('\\', '/');
+				if (path === 'stream' && (source.endsWith('/node_modules/sax/lib/sax.js') || source.endsWith('/node_modules/jszip/lib/readable-stream-browser.js')) ||
+					path === 'fs' && source.endsWith('/node_modules/cfb/cfb.js'))
+					return { path: resolve('scripts/docx-browser-node-api.cjs') };
+			});
+		},
+	};
 }
