@@ -245,7 +245,7 @@
     "source-styles.css": "3599ae983196513a8d5bb1d8003f6b57df0d36d1de7284a9289445dad5db4e0f",
     "scripts/community-build.mjs": "e996a71b2efd70b4f104149dbe7b691fb4f187175e754f662076f811a90bd0ae",
     "scripts/verify-accepted-artifacts.mjs": "a01b7eace9e2d4f6e89d4ebdeb6815e28670a7238391c95fbc74f5ada57a055c",
-    "scripts/verify-source-snapshot.mjs": "c915134934d9c000e73726c5050a4766dcdb59c52698200b30939ba70eeb696d",
+    "scripts/verify-source-snapshot.mjs": "a7509be02c2f44e29c397a10fca80bc9d9b1df614e729d85d83f166ce1039e36",
     ".gitignore": "e993dc196186e6371916fc30edbe592891ac2e226cb2716588f5666a0774f81f",
     ".gitattributes": "7846b37551c23529eb00c68fbb5a435390e922d9db2625cb88681c31746b289e",
     "AGENTS.md": "bcec834b29c9909fb5491fce648885961dc2d011952624834664aeff6ee7d01d",
