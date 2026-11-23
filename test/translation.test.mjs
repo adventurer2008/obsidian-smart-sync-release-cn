@@ -336,7 +336,7 @@ test('the local lab can send a phrase and displays the matching offline source',
 		await tick();
 		const section = modals.at(-1).contentEl.querySelector('details');
 		assert.ok(section.open);
-		assert.equal(section.querySelector('summary').textContent, '牛津');
+		assert.equal(section.querySelector('summary').textContent, '牛津高阶英汉双解词典');
 		assert.match(section.textContent, /起飞/);
 	} finally { dispose(); }
 });
@@ -353,12 +353,12 @@ for (const version of ['1.1.7-alpha.15', '1.1.7']) test(`the hosted China ${vers
 		await tick();
 		const output = modals.at(-1).contentEl;
 		const labels = () => [...output.querySelectorAll('summary')].map(section => section.textContent);
-		assert.deepEqual(labels(), ['牛津', '朗文']);
+		assert.deepEqual(labels(), ['牛津高阶英汉双解词典', '朗文']);
 		assert.deepEqual(requests[1].input, { text: 'take off', target: 'zh-Hans', dictionary: 'alpha' });
 		output.querySelector('details').open = false;
 		requests[1].resolve({ dictionaries: [oxford, longman, { ...oxford, source: 'bing' }] });
 		await tick();
-		assert.deepEqual(labels(), ['牛津', '朗文', '必应词典']);
+		assert.deepEqual(labels(), ['牛津高阶英汉双解词典', '朗文', '必应词典']);
 		assert.equal(output.querySelector('details').open, false);
 		const sentence = 'The plane will take off.';
 		owner.command.editorCheckCallback(false, { getSelection: () => sentence }, { file });
@@ -376,6 +376,6 @@ test('the hosted China Alpha falls back to the existing lookup on older servers'
 		assert.deepEqual(requests[1].input, { text: 'access', target: 'zh-Hans', dictionary: 'alpha' });
 		requests[1].resolve({ dictionaries: [{ source: 'oxford-v3', definitions: [{ part: '', meaning: '入口' }] }] });
 		await tick();
-		assert.equal(modals.at(-1).contentEl.querySelector('summary').textContent, '牛津');
+		assert.equal(modals.at(-1).contentEl.querySelector('summary').textContent, '牛津高阶英汉双解词典');
 	} finally { dispose(); }
 });

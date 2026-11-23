@@ -133,9 +133,10 @@ export function registerEpubReader(owner) {
 			await workspace.revealLeaf(leaf);
 		} catch { new Notice(t('epub.invalid')); }
 	};
-	owner.registerEvent(workspace.on('file-menu', (menu, file) => {
+	const addFileMenu = (menu, file) => {
 		if (epubFile(file)) menu.addItem(item => item.setTitle(t('epub.open')).setIcon('book-open').onClick(() => open(file)));
-	}));
+	};
+	owner.registerEvent(workspace.on('file-menu', addFileMenu));
 	if (workspace.onLayoutReady) workspace.onLayoutReady(registerExtension);
 	else registerExtension();
 	if (FuzzySuggestModal) {
@@ -153,6 +154,7 @@ export function registerEpubReader(owner) {
 		} });
 		owner.register(() => picker?.close());
 	}
+	return addFileMenu;
 }
 
 function errorText(error) {

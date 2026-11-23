@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { test, after } from 'node:test';
 import { registerHooks } from 'node:module';
 import { JSDOM, VirtualConsole } from 'jsdom';
-import { createLocked, openLocked, updateLocked, lockedMarker, lockedRanges } from '../src/note-crypto.js';
+import { createLocked, openLocked, rewrapLocked, updateLocked, lockedMarker, lockedRanges } from '../src/note-crypto.js';
+import { freshSalt, packNote, unlockWorkspace, workspaceProof } from '../src/codec.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { WorkspaceApi } from '../src/client.js';
+import { emptyState, NotebookSynchronizer } from '../src/synchronizer.js';
+import { attachmentPackagePath, decryptAttachment, stageNoteAttachments, verifyNoteAttachments } from '../src/note-attachments.js';
 
 const domErrors = [], console = new VirtualConsole();
 console.on('jsdomError', error => domErrors.push(error.message));
@@ -32,6 +40,8 @@ const { NoteEncryption, encryptionExtension } = await import('../src/note-encryp
 const { editorInfoField, modals, menus, Platform } = await import('./encryption-dom-sdk.mjs');
 const { EditorState } = await import('@codemirror/state');
 const { EditorView } = await import('@codemirror/view');
+const edit = (view, text) => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+const contents = view => view.state.doc.toString();
 after(() => { dom.window.close(); assert.deepEqual(domErrors, [], 'DOM/CodeMirror asynchronous errors must not be ignored'); });
 
 test('reading view selection menu preserves copy and encrypts only an exact unambiguous source range', async () => {
@@ -70,9 +80,9 @@ test('reading view selection menu preserves copy and encrypts only an exact unam
 });
 const password = 'actual DOM fixture password';
 
-async function fixture(kind = 'text', original = '初始秘密') {
+async function fixture(kind = 'text', original = '初始秘密', { refreshInProcess = true, received } = {}) {
 	const box = await createLocked(original, password, '公开的提示', kind);
-	let disk = kind === 'text' ? '前文 ' + lockedMarker(box) + ' 后文' : lockedMarker(box);
+	let disk = received ?? (kind === 'text' ? '前文 ' + lockedMarker(box) + ' 后文' : lockedMarker(box));
 	const file = { path: 'Visible title.md', stat: { mtime: 1577836800123 } }, drafts = new Map(), dirs = new Set();
 	let view;
 	const editor = {
@@ -81,17 +91,28 @@ async function fixture(kind = 'text', original = '初始秘密') {
 		posToOffset: value => value,
 	};
 	const info = { file, editor };
+	const applyViewText = text => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+	const markdownView = {
+		file, editor, getViewData: editor.getValue,
+		setViewData(text) {
+			const previous = editor.getValue();
+			let start = 0, end = 0;
+			while (start < previous.length && previous[start] === text[start]) start++;
+			while (end < Math.min(previous.length, text.length) - start && previous.at(-1 - end) === text.at(-1 - end)) end++;
+			view.dispatch({ changes: { from: start, to: previous.length - end, insert: text.slice(start, text.length - end) } });
+		},
+	};
 	globalThis.encryptionEditorInfo = info;
 	const app = {
 		vault: { configDir: '.fixture', read: async () => disk, getAbstractFileByPath: path => path === file.path ? file : null,
 			process: async (_file, change, options) => {
 				disk = change(disk); file.stat.mtime = options?.mtime ?? Date.now();
-				view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: disk } });
+				if (refreshInProcess) applyViewText(disk);
 				return disk;
 			},
 			adapter: { exists: async path => dirs.has(path) || drafts.has(path), mkdir: async path => dirs.add(path), write: async (path, raw) => drafts.set(path, raw), remove: async path => drafts.delete(path) },
 		},
-		workspace: { getLeavesOfType: () => [{ view: { file, editor } }] },
+		workspace: { getLeavesOfType: () => [{ view: markdownView }] },
 	};
 	const manager = new NoteEncryption({ app, manifest: { id: 'wujie-sync' }, data: {} });
 	const container = document.body.createDiv();
@@ -101,6 +122,113 @@ async function fixture(kind = 'text', original = '初始秘密') {
 async function submit() {
 	const prompt = modals.at(-1); prompt.password.value = password; await prompt.run(); assert.equal(prompt.closed, true);
 }
+
+for (const connected of [false, true]) test(
+	'whole-note encryption, attachment picker and restoration in ' + (connected ? 'a connected vault' : 'an independent vault'),
+	async () => {
+	const file = { path: 'Private.md', stat: { mtime: 1577836800123 } };
+	const photo = { path: 'image.png', stat: { mtime: 1577836800123, ctime: 1577836800123, size: 4 } };
+	const body = 'before ![[image.png|200]] after\nprivate image note';
+	let disk = body;
+	const files = new Map([[file.path, file], [photo.path, photo]]);
+	const stored = new Map([[photo, Uint8Array.of(1, 2, 3, 4).buffer]]);
+	const vault = {
+		configDir: '.fixture', getMarkdownFiles: () => [file], getFiles: () => [...files.values()], getAbstractFileByPath: path => files.get(path),
+		adapter: { exists: async path => files.has(path) },
+		read: async () => disk, readBinary: async file => stored.get(file).slice(0),
+		process: async (_file, update) => { disk = update(disk); },
+		async createBinary(path, bytes, options) {
+			const result = { path, stat: { size: bytes.byteLength, ...options } };
+			files.set(path, result); stored.set(result, bytes.slice(0));
+			return result;
+		},
+		async delete(file) { files.delete(file.path); stored.delete(file); },
+	};
+	const manager = new NoteEncryption({ app: { vault, workspace: { getLeavesOfType: () => [] }, metadataCache: {
+		getFileCache: () => ({ embeds: [{ link: 'image.png|200', original: '![[image.png|200]]' }] }), getFirstLinkpathDest: path => files.get(path),
+	} }, manifest: { id: 'wujie-sync' }, data: { settings: connected ? { workspace: 'fixture' } : {} }, async saveData() {} });
+	const activeURLs = new Map();
+	const area = document.body.createDiv();
+	const url = area.ownerDocument.defaultView.URL;
+	url.createObjectURL = blob => { activeURLs.set('blob:fixture', blob); return 'blob:fixture'; };
+	url.revokeObjectURL = value => activeURLs.delete(value);
+	try {
+		let encrypt;
+		manager.addFileMenu({ addItem: callback => callback({ setTitle: () => ({ setIcon: () => ({ onClick: callback => { encrypt = callback; } }) }) }) }, file);
+		encrypt();
+		await new Promise(resolve => setImmediate(resolve));
+		const passwordForm = modals.at(-1);
+		assert.ok(passwordForm.contentEl.textContent.includes('image.png'));
+		passwordForm.confirm.value = password;
+		await submit();
+		assert.equal(files.has(photo.path), false);
+		const [range] = lockedRanges(disk);
+		assert.equal(range.box.kind, 'bundle');
+		assert.equal(range.box.v, 3);
+		assert.equal(files.size, 1);
+		manager.renderLock(area, file.path, range.marker, range.box);
+		area.querySelector('button').click();
+		await submit();
+		for (let tries = 0; tries < 20 && !area.querySelector('.wujie-editor-image'); tries++) await new Promise(resolve => setImmediate(resolve));
+		const inlineImage = area.querySelector('.wujie-editor-image');
+		assert.equal(inlineImage?.src, 'blob:fixture');
+		assert.equal(inlineImage?.width, 200);
+		assert.equal(inlineImage?.closest('.cm-line')?.textContent, 'before  after');
+		assert.equal(area.querySelectorAll('.wujie-decrypted-attachments').length, 0);
+		assert.equal(activeURLs.get('blob:fixture').type, 'image/png');
+		assert.equal(files.has(photo.path), false);
+		assert.equal(disk, range.marker);
+		const [session] = manager.sessions;
+		const sameEditor = session.editor.view;
+		await manager.finishEditing(session);
+		assert.equal(session.editor.view, sameEditor);
+		manager.editSession(session);
+		const pdf = new File(['private PDF bytes'], 'file name.pdf', { lastModified: photo.stat.mtime });
+		const addedImage = new File([Uint8Array.of(5, 6, 7)], 'new image.png', { lastModified: photo.stat.mtime });
+		const process = vault.process;
+		vault.process = async () => { throw Error('fixture interrupted before marker commit'); };
+		await assert.rejects(manager.saveAttachments(session, [pdf]), /fixture interrupted/u);
+		vault.process = process;
+		assert.equal(disk, range.marker);
+		assert.equal(files.size, 1, 'failed import leaves the former encrypted note in place');
+
+		[...area.querySelectorAll('button')].find(el => el.textContent === '添加附件').click();
+		const picker = document.querySelector('input[type=file]');
+		assert.ok(picker.multiple);
+		Object.defineProperty(picker, 'files', { value: [pdf, addedImage] });
+		const modalCount = modals.length;
+		picker.dispatchEvent(new dom.window.Event('change'));
+		assert.ok(session.attachmentWork);
+		await session.attachmentWork;
+		assert.equal(modals.length, modalCount);
+		const [updated] = lockedRanges(disk);
+		assert.notEqual(updated.box.id, range.box.id);
+		assert.equal(files.has('file name.pdf'), false);
+		assert.equal(files.has(`wujie-locked-${range.box.id}.wujie-lock`), false);
+		assert.ok(contents(session.editor.view).includes('[file name.pdf](<./file%20name.pdf>)'));
+		for (let tries = 0; tries < 20 && !area.querySelector('.wujie-editor-image[alt="new image.png"]'); tries++)
+			await new Promise(resolve => setImmediate(resolve));
+		assert.ok(area.querySelector('.wujie-editor-image[alt="new image.png"]')?.closest('.cm-line'));
+		assert.equal(files.has('new image.png'), false);
+		assert.ok(!disk.includes('file name.pdf') && !disk.includes('private PDF bytes'));
+		await manager.lock(session);
+		assert.equal(area.querySelectorAll('.wujie-editor-image').length, 0);
+		assert.equal(activeURLs.size, 0);
+		assert.equal(files.has(photo.path), false);
+		manager.permanent({ area, path: file.path, marker: updated.marker, box: updated.box, saved: 0, version: 0 });
+		await submit();
+		assert.ok(disk.startsWith(body));
+		assert.deepEqual(new Uint8Array(await vault.readBinary(files.get(photo.path))), Uint8Array.of(1, 2, 3, 4));
+		assert.equal(files.get(photo.path).stat.mtime, photo.stat.mtime);
+		assert.equal(new TextDecoder().decode(await vault.readBinary(files.get('file name.pdf'))), 'private PDF bytes');
+		assert.equal(files.get('file name.pdf').stat.mtime, pdf.lastModified);
+		assert.deepEqual(new Uint8Array(await vault.readBinary(files.get('new image.png'))), Uint8Array.of(5, 6, 7));
+		assert.equal(await pdf.text(), 'private PDF bytes');
+	} finally {
+		manager.dispose(); area.remove();
+		delete url.createObjectURL; delete url.revokeObjectURL;
+	}
+});
 
 test('real CodeMirror DOM replaces inline and multiline full-note ciphertext with clickable lock controls', async () => {
 	for (const kind of ['text', 'note']) {
@@ -116,23 +244,318 @@ test('real CodeMirror DOM replaces inline and multiline full-note ciphertext wit
 	}
 });
 
-test('actual DOM auto-save keeps the same decrypted widget/input alive across host editor reloads and locks the updated ciphertext', async () => {
+test('a picker returning after lock cannot import until the note is reopened', async () => {
+	const value = await fixture('note');
+	const vault = value.manager.app.vault;
+	const packages = new Map();
+	const find = vault.getAbstractFileByPath, exists = vault.adapter.exists;
+	Object.assign(vault, {
+		getFiles: () => [value.file, ...packages.values()],
+		getAbstractFileByPath: path => find(path) ?? packages.get(path),
+		createBinary: async (path, bytes) => {
+			assert.ok(!packages.has(path));
+			const file = { path, bytes, stat: { size: bytes.byteLength } };
+			packages.set(path, file);
+			return file;
+		},
+		readBinary: async file => file.bytes.slice(0),
+		delete: async file => packages.delete(file.path),
+	});
+	vault.adapter.exists = async path => packages.has(path) || await exists(path);
+	try {
+		value.container.querySelector('button').click(); await submit();
+		const [session] = value.manager.sessions;
+		value.manager.editSession(session);
+		const add = [...value.container.querySelectorAll('button')].find(el => el.textContent === '添加附件');
+		assert.ok(add);
+		add.click();
+		const picker = document.querySelector('input[type=file]');
+		const photo = new File([Uint8Array.of(7, 8, 9)], 'photo.png', { lastModified: 123 });
+		const before = value.read(), modalCount = modals.length;
+		assert.equal(session.wrapKey.extractable, false);
+		await value.manager.lock(session);
+		assert.equal(session.wrapKey, undefined);
+		Object.defineProperty(picker, 'files', { value: [photo] });
+		picker.dispatchEvent(new dom.window.Event('change'));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(modals.length, modalCount);
+		assert.equal(value.read(), before);
+		assert.equal(packages.size, 0);
+		assert.equal(value.container.querySelector('.wujie-crypto-editor'), null);
+		value.container.querySelector('button').click(); await submit();
+		const [reopened] = value.manager.sessions;
+		await value.manager.saveAttachments(reopened, [photo]);
+		const [range] = lockedRanges(value.read());
+		assert.equal(range.box.kind, 'bundle');
+		assert.equal(range.box.v, 3);
+		assert.equal(packages.size, 0);
+		assert.equal(packages.has('photo.png'), false);
+		const { text } = await openLocked(range.box, password);
+		assert.match(JSON.parse(text).text, /初始秘密[\s\S]*!\[\]\(<\.\/photo\.png>\)/u);
+		assert.equal(reopened.box.id, range.box.id);
+		assert.equal(range.box.salt, session.box.salt);
+		await assert.rejects(openLocked(range.box, 'wrong password'));
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('adding to an existing sidecar bundle migrates it only after saving the new note', async () => {
+	const original = Uint8Array.of(6, 8, 9);
+	const old = { path: 'old.png', stat: { size: 3, mtime: 50, ctime: 40 } };
+	let sidecar;
+	const legacy = await createLocked('', password, '', 'bundle', async (id, key) => {
+		const vault = {
+			getAbstractFileByPath: path => path === sidecar?.path ? sidecar : null,
+			readBinary: async file => (file === old ? original.buffer : sidecar.bytes).slice(0),
+			async createBinary(path, bytes) { return sidecar = { path, bytes, stat: { size: bytes.byteLength } }; },
+		};
+		return (await stageNoteAttachments(vault, id, key, '![[old.png]]', [old])).value;
+	});
+	const value = await fixture('note', undefined, { received: lockedMarker(legacy) });
+	const vault = value.manager.app.vault;
+	const getFile = vault.getAbstractFileByPath;
+	Object.assign(vault, {
+		getFiles: () => sidecar ? [value.file, sidecar] : [value.file],
+		getAbstractFileByPath: path => path === sidecar?.path ? sidecar : getFile(path),
+		readBinary: async () => sidecar.bytes.slice(0),
+		async delete(file) { assert.equal(file.path, attachmentPackagePath(legacy.id)); sidecar = undefined; },
+	});
+	try {
+		value.manager.owner.data.settings = { workspace: 'test-vault' };
+		value.container.querySelector('button').click(); await submit();
+		const [session] = value.manager.sessions;
+		const extra = new File(['original bytes'], 'next.pdf');
+		const process = vault.process;
+		vault.process = async () => { throw Error('interrupted migration'); };
+		await assert.rejects(value.manager.saveAttachments(session, [extra]), /interrupted migration/u);
+		assert.ok(sidecar);
+		assert.equal(value.read(), lockedMarker(legacy));
+		vault.process = process;
+		await value.manager.saveAttachments(session, [extra]);
+		assert.equal(sidecar, undefined);
+		assert.equal(session.box.v, 3);
+		assert.equal(session.manifest.entries[0].mtime, old.stat.mtime);
+		assert.deepEqual(await decryptAttachment(session.attachmentBytes, session.box.id, session.key, session.manifest.entries[0]), original);
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('connected vault drop travels as one note and unlocks with attachments on the second device', async t => {
+	const source = await fixture('note');
+	let receiver;
+	const image = new File([Uint8Array.of(1, 3, 7)], 'photo.png', { lastModified: 1577836800456 });
+	const pdfContents = '%PDF-1.7\nprivate document bytes\n' + 'a'.repeat(2400000);
+	const pdf = new File([pdfContents], 'report.pdf', { lastModified: 1577836800789 });
+	const opts = { workspace: 'synthetic-connected-vault' };
+	const previews = new Map();
+	const url = dom.window.URL;
+	url.createObjectURL = blob => {
+		const address = 'blob:connected-' + previews.size;
+		previews.set(address, blob); return address;
+	};
+	url.revokeObjectURL = address => previews.delete(address);
+	try {
+		source.manager.owner.data.settings = opts;
+		const vault = source.manager.app.vault;
+		vault.getFiles = () => [source.file];
+		vault.createBinary = () => assert.fail('Connected import must not write plaintext or a sidecar');
+		source.container.querySelector('button').click(); await submit();
+		const [session] = source.manager.sessions;
+		assert.ok([...session.area.querySelectorAll('button')].some(control => control.textContent === '添加附件'));
+		const transfer = { types: ['Files'], files: [image, pdf] };
+		const fire = type => {
+			const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true });
+			Object.defineProperty(event, 'dataTransfer', { value: transfer });
+			session.editor.view.contentDOM.dispatchEvent(event);
+			return event;
+		};
+		assert.equal(fire('dragover').defaultPrevented, true);
+		assert.equal(transfer.dropEffect, 'copy');
+		const before = modals.length;
+		assert.equal(fire('drop').defaultPrevented, true);
+		assert.ok(session.attachmentWork);
+		await session.attachmentWork;
+		assert.equal(modals.length, before);
+		const serialized = source.read();
+		assert.ok(serialized.length > 4 * 1024 * 1024, 'cover envelopes exceeding the former decode limit');
+		assert.ok(!serialized.includes('private document bytes') && !serialized.includes('report.pdf'));
+		const box = lockedRanges(serialized)[0].box;
+		assert.equal(box.v, 3);
+		const mtime = source.file.stat.mtime;
+		const salt = freshSalt();
+		const keys = await unlockWorkspace('synthetic sync password', salt);
+		const bytes = new TextEncoder().encode(serialized);
+		let api;
+		if (process.env.SMART_SYNC_SERVER_DIR) {
+			const fixtureUrl = pathToFileURL(resolve(process.env.SMART_SYNC_SERVER_DIR, 'test/service-fixture.mjs'));
+			const { createTestService } = await import(fixtureUrl.href);
+			const directory = await mkdtemp(join(tmpdir(), 'ss2-connected-attachments-'));
+			const access = 'synthetic-connected-attachments-0123456789012345';
+			const service = await createTestService({ directory, credentials: [{ owner: 'synthetic', key: access }] });
+			t.after(async () => { await service.stop(); await rm(directory, { recursive: true, force: true }); });
+			api = new WorkspaceApi(await service.listen(), access);
+			api.workspace = (await api.create('Connected attachments', salt, await workspaceProof(keys))).id;
+			const sender = new NotebookSynchronizer({
+				api, keys, direction: 'send', attachmentLimit: 0, save: async () => {},
+				host: {
+					list: async () => [source.file.path], read: async () => bytes, mtime: async () => mtime,
+				},
+			});
+			await sender.run();
+		} else {
+			const packet = await packNote(keys, opts.workspace, source.file.path, bytes, undefined, undefined, 'file', mtime);
+			const objects = new Map(packet.objects.map(object => [object.address, object.body]));
+			api = { workspace: opts.workspace, load: async id => objects.get(id), feed: async after => ({
+				entries: after ? [] : [{ sequence: 1, note: packet.id, manifest: packet.manifest, removed: false }], more: false,
+			}) };
+		}
+		let received;
+		const sync = new NotebookSynchronizer({
+			api, keys, state: emptyState(), direction: 'receive', attachmentLimit: 0, ignored: ['*.wujie-lock'],
+			save: async () => {}, host: { list: async () => [], read: async () => null, write: async (...args) => { received = args; } },
+		});
+		await sync.run();
+		assert.equal(received[0], source.file.path);
+		assert.equal(received[2], mtime);
+		const text = new TextDecoder().decode(received[1]);
+		assert.equal(text, serialized);
+		await source.manager.lock(session);
+		assert.equal(session.wrapKey, undefined);
+		receiver = await fixture('note', undefined, { received: text });
+		receiver.manager.owner.data.settings = opts;
+		receiver.manager.app.vault.createBinary = () => assert.fail('Temporary unlock must not create a file');
+		receiver.container.querySelector('button').click(); await submit();
+		const [reopened] = receiver.manager.sessions;
+		assert.match(contents(reopened.editor.view), /report\.pdf/u);
+		for (let tries = 0; tries < 20 && !receiver.container.querySelector('.wujie-editor-image'); tries++)
+			await new Promise(resolve => setImmediate(resolve));
+		assert.match(receiver.container.querySelector('.wujie-editor-image')?.src ?? '', /^blob:connected-/u);
+		const manifest = reopened.manifest;
+		assert.equal(manifest.entries[0].mtime, image.lastModified);
+		assert.equal(manifest.entries[1].mtime, pdf.lastModified);
+		assert.deepEqual(await decryptAttachment(reopened.attachmentBytes, box.id, reopened.key, manifest.entries[0]), Uint8Array.of(1, 3, 7));
+		assert.equal(new TextDecoder().decode(await decryptAttachment(reopened.attachmentBytes, box.id, reopened.key, manifest.entries[1])), pdfContents);
+		const rotated = await rewrapLocked(box, password, 'replacement note password');
+		assert.equal(rotated.attachmentData, box.attachmentData);
+		await assert.rejects(openLocked(rotated, password));
+		assert.equal((await openLocked(rotated, 'replacement note password')).text, (await openLocked(box, password)).text);
+		const corrupted = (box.attachmentData[0] === 'A' ? 'B' : 'A') + box.attachmentData.slice(1);
+		await assert.rejects(verifyNoteAttachments(receiver.manager.app.vault, box.id, reopened.key, manifest, corrupted));
+		await receiver.manager.lock(reopened);
+		assert.equal(receiver.container.querySelector('.wujie-editor-image'), null);
+		assert.equal(previews.size, 0);
+	} finally {
+		source.dispose();
+		receiver?.dispose();
+		await Promise.all([...source.manager.pendingWrites, ...(receiver?.manager.pendingWrites ?? [])]);
+		delete url.createObjectURL; delete url.revokeObjectURL;
+	}
+});
+
+test('actual DOM auto-save keeps the same secure editor alive across host reloads and locks updated ciphertext', async () => {
 	const value = await fixture();
 	try {
 		value.container.querySelector('.wujie-encrypted button').click(); await submit();
 		const session = [...value.manager.sessions][0]; value.manager.editSession(session);
-		const input = session.input; input.value = '第一版修改'; input.dispatchEvent(new dom.window.Event('input'));
+		const editor = session.editor.view;
+		edit(editor, '第一版修改');
 		await value.manager.queueSave(session);
-		assert.ok(input.isConnected, 'host reload must not replace the active secure editor');
+		assert.equal(session.status.textContent, '');
+		assert.ok(editor.dom.isConnected, 'host reload must not replace the active secure editor');
 		assert.equal(session.locked, undefined);
-		input.value = '第二版中文👩‍💻'; input.dispatchEvent(new dom.window.Event('input')); await value.manager.queueSave(session);
-		assert.equal(session.input, input);
+		edit(editor, '第二版中文👩‍💻'); await value.manager.queueSave(session);
+		assert.equal(session.editor.view, editor);
 		assert.equal((await openLocked(lockedRanges(value.read())[0].box, password)).text, '第二版中文👩‍💻');
 		await value.manager.lock(session);
-		assert.equal(input.value, ''); assert.equal(session.key, undefined);
+		assert.equal(contents(editor), ''); assert.equal(session.key, undefined);
+		assert.equal(editor.dom.isConnected, false);
 		assert.ok(!value.container.textContent.includes('第二版中文'));
 		assert.equal(value.drafts.size, 0);
 	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('secure live preview renders formatting in place, keeps Markdown on save and treats HTML as text', async () => {
+	const value = await fixture('note', '# 标题\n\n粗体内容\n\n- 列表项\n\n<img src="https://example.test/private.png">\n\n结尾');
+	try {
+		value.container.querySelector('.wujie-encrypted button').click(); await submit();
+		const [session] = value.manager.sessions;
+		value.manager.editSession(session);
+		const view = session.editor.view;
+		const selection = contents(view).indexOf('粗体内容');
+		view.dispatch({ selection: { anchor: selection, head: selection + '粗体内容'.length } });
+		session.area.querySelector('button[aria-label="加粗"]').click();
+		view.dispatch({ selection: { anchor: view.state.doc.length } });
+		assert.equal(view.dom.querySelector('.wujie-editor-h1').textContent, '标题');
+		assert.equal(view.dom.querySelector('strong').textContent, '粗体内容');
+		assert.ok(view.dom.textContent.includes('• 列表项'));
+		assert.ok(view.dom.textContent.includes('<img src="https://example.test/private.png">'));
+		assert.equal(view.dom.querySelectorAll('img[src]').length, 0);
+		await value.manager.queueSave(session);
+		const plain = (await openLocked(lockedRanges(value.read())[0].box, password)).text;
+		assert.ok(plain.includes('**粗体内容**'));
+		assert.ok(!value.read().includes('粗体内容'));
+		await value.manager.lock(session);
+		assert.equal(contents(view), '');
+		assert.ok(!value.container.textContent.includes('粗体内容'));
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('encrypted autosave refreshes a stale host editor and still refuses new surrounding edits', async () => {
+	const value = await fixture('text', '初始秘密', { refreshInProcess: false });
+	try {
+		value.container.querySelector('.wujie-encrypted button').click();
+		await submit();
+		const [session] = value.manager.sessions;
+		value.manager.editSession(session);
+		const editor = session.editor.view;
+		for (const text of ['第一次修改', '第二次修改']) {
+			edit(editor, text);
+			await value.manager.queueSave(session);
+			assert.equal(value.view.state.doc.toString(), value.read());
+			assert.equal((await openLocked(lockedRanges(value.read())[0].box, password)).text, text);
+			assert.ok(editor.dom.isConnected);
+		}
+		value.view.dispatch({ changes: { from: 0, insert: '外部未保存修改 ' } });
+		edit(editor, '只留在加密草稿中的修改');
+		await value.manager.queueSave(session);
+		assert.ok(value.view.state.doc.toString().startsWith('外部未保存修改'));
+		assert.equal((await openLocked(lockedRanges(value.read())[0].box, password)).text, '第二次修改');
+		assert.equal(value.drafts.size, 1);
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('live-preview code block redraw keeps the same secure editor through consecutive saves', async () => {
+	const value = await fixture('note');
+	const { manager, file, container } = value;
+	try {
+		manager.app.workspace.getLeavesOfType()[0].view.containerEl = container;
+		const [original] = lockedRanges(value.read());
+		const area = container.createDiv();
+		manager.renderLock(area, file.path, original.marker, original.box);
+		area.querySelector('button').click();
+		await submit();
+		const [session] = manager.sessions;
+		manager.editSession(session);
+		const editor = session.editor.view;
+		const { vault } = manager.app;
+		const write = vault.process;
+		vault.process = async (...args) => {
+			const saved = await write(...args);
+			const [range] = lockedRanges(saved);
+			const fresh = document.createElement('div');
+			manager.renderLock(fresh, file.path, range.marker, range.box);
+			area.replaceWith(fresh);
+			return saved;
+		};
+		for (const text of ['第一次预览编辑', '第二次预览编辑', '第三次预览编辑']) {
+			edit(editor, text);
+			await manager.queueSave(session);
+			assert.equal((await openLocked(lockedRanges(value.read())[0].box, password)).text, text);
+			assert.equal(session.editor.view, editor);
+			assert.ok(editor.dom.isConnected);
+		}
+		await manager.lock(session);
+		assert.equal(contents(editor), '');
+		assert.equal(session.renderObserver, undefined);
+	} finally { value.dispose(); await Promise.all(manager.pendingWrites); }
 });
 
 test('partial ciphertext edits are rejected while deleting a whole encrypted block remains possible', async () => {
@@ -170,13 +593,14 @@ test('an unwritable ciphertext journal reports failure and a successful retry cl
 		const session = [...value.manager.sessions][0]; value.manager.editSession(session);
 		const adapter = value.manager.app.vault.adapter, originalWrite = adapter.write, original = value.read();
 		adapter.write = async () => { throw Error('synthetic disk full'); };
-		session.input.value = '需要重试的秘密'; session.input.dispatchEvent(new dom.window.Event('input'));
+		edit(session.editor.view, '需要重试的秘密');
 		await value.manager.queueSave(session);
 		assert.equal(value.read(), original); assert.equal(session.failed, true);
 		assert.equal(value.manager.volatileDrafts.size, 1);
 		assert.ok(session.status.textContent.includes('尚未确认保存'));
 		adapter.write = originalWrite;
 		await value.manager.queueSave(session);
+		assert.equal(session.status.textContent, '');
 		assert.equal(session.failed, false); assert.equal(value.manager.volatileDrafts.size, 0);
 		assert.equal((await openLocked(lockedRanges(value.read())[0].box, password)).text, '需要重试的秘密');
 		await value.manager.lock(session); assert.equal(session.key, undefined);
@@ -245,10 +669,10 @@ test('nested encrypted blocks unlock separately and inner edits survive outer en
 		innerArea.querySelector('button').click(); await submit();
 		const nested = [...value.manager.sessions].find(session => session.parentSession === outer); assert.ok(nested);
 		assert.equal(nested.text, '内层原文');
-		value.manager.editSession(nested); nested.input.value = '内层新内容'; nested.input.dispatchEvent(new dom.window.Event('input'));
+		value.manager.editSession(nested); edit(nested.editor.view, '内层新内容');
 		await value.manager.editSession(outer);
 		assert.equal(nested.key, undefined, 'outer editing must flush and lock nested editors first');
-		assert.equal((await openLocked(lockedRanges(outer.input.value)[0].box, password)).text, '内层新内容');
+		assert.equal((await openLocked(lockedRanges(contents(outer.editor.view))[0].box, password)).text, '内层新内容');
 		await value.manager.lock(outer);
 		assert.equal(value.manager.sessions.size, 0); assert.equal(outer.key, undefined); assert.equal(nested.key, undefined);
 		const outerText = (await openLocked(lockedRanges(value.read())[0].box, password)).text;

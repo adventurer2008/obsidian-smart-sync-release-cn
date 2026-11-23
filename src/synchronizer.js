@@ -11,6 +11,7 @@ import {
 } from './codec.js';
 import { mergeNote, rememberBase } from './merge.js';
 import { BATCH_BYTES } from './client.js';
+import { CONFLICT_DIRECTORY } from './configuration.js';
 
 // Dirty state follows the connection across short-lived engine instances, including failed saves.
 const unsavedStates = new WeakSet();
@@ -404,8 +405,8 @@ export class NotebookSynchronizer {
 	}
 	excluded(path, receiving = false) {
 		return (
-			path === 'Smart Sync conflicts' ||
-			path.startsWith('Smart Sync conflicts/') ||
+			path === CONFLICT_DIRECTORY ||
+			path.startsWith(`${CONFLICT_DIRECTORY}/`) ||
 			!this.accepts(path) ||
 			(!receiving && this.host.excluded?.(path)) ||
 			this.ignored.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
@@ -432,6 +433,8 @@ export class NotebookSynchronizer {
 					error.pendingReceiveCount = Object.keys(this.state.pendingReceives ?? {}).length;
 					throw error;
 				}
+				if (this.direction !== 'paused' && this.remoteMode !== 'paused')
+					await this.host.cleanupConflictFolders?.();
 			})
 			.catch(async (error) => {
 				unsavedStates.add(this.state);
@@ -1802,6 +1805,8 @@ export class NotebookSynchronizer {
 		}
 		if (choice !== 'both') await this.host.remove(conflict.copy);
 		this.state.conflicts = this.state.conflicts.filter((entry) => entry !== conflict);
+		if (choice !== 'both' && copy.startsWith(`${CONFLICT_DIRECTORY}/`))
+			await this.host.cleanupConflictFolders?.();
 		await this.#persist();
 	}
 }

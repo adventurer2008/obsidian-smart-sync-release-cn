@@ -26,7 +26,6 @@ const bundled = Object.keys(map.inputs)
 	.filter((file) => file.startsWith('src/'))
 	.sort();
 if (
-	files.length !== 30 ||
 	JSON.stringify(files.map((file) => `src/${file}`)) !== JSON.stringify(bundled)
 )
 	throw new Error('Lint coverage differs from the full client runtime closure');

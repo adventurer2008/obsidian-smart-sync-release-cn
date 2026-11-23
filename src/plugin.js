@@ -9,6 +9,7 @@ import { registerNoteSearch } from './search.js';
 import { registerNoteEncryption } from './note-encryption.js';
 import { registerNoteTranslation } from './translation.js';
 import { registerEpubReader } from './epub-view.js';
+import { registerDocxEditor } from './docx-view.js';
 /* global __SMART_SYNC_CN_TRANSLATION__ -- injected by the regional build. */
 import {
 	ItemView,
@@ -57,7 +58,7 @@ import {
 	pairingFault,
 } from './pairing.js';
 import { decryptRecovery, encryptRecovery } from './recovery.js';
-import { routedFetch } from './routing.js';
+import { chinaAuthority, chinaIdentityTimeout, chinaSyncFetch, chinaSyncOrigin, routedFetch } from './routing.js';
 import { sampleVaultSize, LanPeers, intersectDirection, bindLanTransfers, localNoteProvider, receivePeerNote } from './peers.js';
 import { ReceiveCache } from './resume.js';
 import { desktopFiles } from './desktop.js';
@@ -781,7 +782,8 @@ export default class IndependentSync extends Plugin {
 			}
 		this.logViews = new Set();
 		registerNoteSearch(this);
-		registerEpubReader(this);
+		const addEpubMenu = registerEpubReader(this);
+		const addDocxMenu = registerDocxEditor(this);
 		let translation;
 		if (typeof __SMART_SYNC_CN_TRANSLATION__ === 'undefined' ? edition.edition === 'cn' : __SMART_SYNC_CN_TRANSLATION__) {
 			translation = registerNoteTranslation(this);
@@ -803,8 +805,13 @@ export default class IndependentSync extends Plugin {
 				}
 				addFileMenu(context, context.file, true);
 				encryption.addFileMenu(context, context.file);
+				addDocxMenu?.(context, context.file);
+				addEpubMenu?.(context, context.file);
 			});
-			const disposeFolder = menus?.registerFolderMenu?.(context => addFileMenu(context, context.folder, true));
+			const disposeFolder = menus?.registerFolderMenu?.(context => {
+				addFileMenu(context, context.folder, true);
+				addDocxMenu?.(context, context.folder);
+			});
 			this.disposeNavigatorMenus = () => {
 				disposeFile?.();
 				disposeFolder?.();
@@ -1962,6 +1969,7 @@ export default class IndependentSync extends Plugin {
 	workspaceApi(origin, ...args) {
 		assertEditionOrigin(origin);
 		const api = new WorkspaceApi(origin, ...args);
+		const china = edition.edition === 'cn' && api.origin === chinaSyncOrigin && args[2] === undefined && this.data?.localId;
 		if (Platform.isAndroidApp === true && supportsAndroidNativeVersion(this.manifest?.version) && args[2] === undefined) {
 			const binding = JSON.stringify([this.data.localId, api.origin, this.data.settings.workspace]);
 			if (this.androidTransport?.binding !== binding) {
@@ -1975,6 +1983,33 @@ export default class IndependentSync extends Plugin {
 				}) };
 			}
 			api.fetcher = this.androidTransport.fetcher;
+		}
+		if (china) {
+			const primary = api.fetcher;
+			const localId = this.data.localId;
+			const binding = JSON.stringify([localId, this.data.settings.workspace, this.androidTransport?.binding]);
+			if (this.chinaTransport?.binding !== binding) {
+				const transports = new Map([[chinaSyncOrigin, primary]]);
+				const getPin = () => this.data[`authority:${chinaSyncOrigin}`];
+				this.chinaTransport = { binding, fetcher: chinaSyncFetch({
+					fetchFor: target => {
+						if (!transports.has(target)) transports.set(target, androidFallback({
+							android: Platform.isAndroidApp === true && supportsAndroidNativeVersion(this.manifest?.version),
+							origin: target, audience: chinaSyncOrigin, requestUrl: ObsidianSdk.requestUrl,
+							getPin: () => getPin() ?? chinaAuthority,
+						}));
+						return transports.get(target);
+					},
+					getPin,
+					getPreferred: () => this.data.chinaSyncPreferredOrigin,
+					savePreferred: async preferred => {
+						if (this.data.localId !== localId || this.chinaTransport?.binding !== binding || this.stopped) return;
+						this.data.chinaSyncPreferredOrigin = preferred;
+						await this.saveData(this.data);
+					},
+				}) };
+			}
+			api.fetcher = this.chinaTransport.fetcher;
 		}
 		return api;
 	}
@@ -2077,6 +2112,7 @@ export default class IndependentSync extends Plugin {
 			signal: api.signal,
 			lan: this.data.settings.lan,
 			fetcher: api.fetcher,
+			identityTimeout: edition.edition === 'cn' && api.origin === chinaSyncOrigin ? chinaIdentityTimeout : undefined,
 			pinned: this.data[pinId],
 			savePin: async (key) => {
 				this.data[pinId] = key;
@@ -2164,6 +2200,7 @@ export default class IndependentSync extends Plugin {
 			return candidates.length === 1 && await desktop.sameEntry(candidates[0].path, path) ? candidates[0] : null;
 		};
 		const host = {
+			...(desktop ? { verifyConflictDirectory: desktop.verifyConflictDirectory } : {}),
 			...(desktop ? { canonicalPath: async path => {
 				try { return await desktop.canonicalPath(path); }
 				catch (error) { if (error.code === 'ENOENT') throw planChanged(); throw error; }
@@ -2862,6 +2899,10 @@ export default class IndependentSync extends Plugin {
 		if (this.stopping) return;
 		if (this.connecting) return;
 		if (this.running) return this.running;
+		if (this.docxWrite) {
+			await this.docxWrite.catch(() => {});
+			return this.synchronize(retryRow, approval, automatic);
+		}
 		if (!this.data.settings.workspace) {
 			this.setStatus(t('sync.notConnected'));
 			return;

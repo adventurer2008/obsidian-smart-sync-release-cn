@@ -255,5 +255,29 @@ export function desktopFiles(vault, { load, stopped = () => false } = {}) {
 		// Correct casing only; never redirect a logical path through an internal link.
 		return actual.toLowerCase() === input.toLowerCase() ? safePath(actual) : input;
 	};
-	return { source, sink, copy, active, prepare, sameEntry, canonicalPath };
+	const verifyAttachmentPath = async (name, missing = false) => {
+		const input = safePath(name);
+		const target = inside(base, path.resolve(base, input));
+		const root = await fs.realpath(base);
+		const parts = input.split('/');
+		let current = root;
+		for (const [index, part] of parts.entries()) {
+			current = path.join(current, part);
+			const final = index === parts.length - 1;
+			const stat = await fs.lstat(current).catch(error => {
+				if (missing && final && error.code === 'ENOENT') return null;
+				throw error;
+			});
+			if (stat && (final ? !stat.isFile() || stat.nlink !== 1 : !stat.isDirectory())) throw Error('Unsafe attachment path');
+		}
+		if (path.relative(base, target).split(path.sep).join('/') !== input) throw Error('Unsafe attachment path');
+	};
+	const verifyConflictDirectory = async name => {
+		const input = safePath(name);
+		const target = inside(base, path.resolve(base, input));
+		const root = await fs.realpath(base);
+		const actual = path.relative(root, await fs.realpath(target)).split(path.sep).join('/');
+		if (actual !== input || !(await fs.lstat(target)).isDirectory()) throw Error('Unsafe conflict directory');
+	};
+	return { source, sink, copy, active, prepare, sameEntry, canonicalPath, verifyAttachmentPath, verifyConflictDirectory };
 }

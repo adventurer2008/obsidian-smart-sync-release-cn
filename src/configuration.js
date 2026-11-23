@@ -1,6 +1,8 @@
 import { safeNotePath, safeHostPath } from './codec.js';
 
 export const CONFIG_NAMESPACE = '__smart_sync_configuration__';
+export const CONFLICT_DIRECTORY = 'Smart Sync conflicts';
+const configurationConflictDirectory = `${CONFLICT_DIRECTORY}/configuration`;
 const ordinary = {
 	'app.json': 'editor',
 	'appearance.json': 'appearance',
@@ -173,6 +175,24 @@ export function configurationHost(vault, normal, scope, { stopped = () => false,
 	const root = vault.configDir;
 	if (typeof root !== 'string' || !root)
 		throw new Error('Obsidian configuration directory is unavailable');
+	async function removeEmptyConflictFolder(path) {
+		if (stopped()) return false;
+		if (!await adapter.exists(path)) return true;
+		await normal.verifyConflictDirectory?.(path);
+		const { files, folders } = await adapter.list(path);
+		if (files.length) return false;
+		for (const folder of folders) {
+			if (!folder.startsWith(`${path}/`) || folder.slice(path.length + 1).includes('/') ||
+				safeHostPath(folder, windows) !== folder) return false;
+			if (path === CONFLICT_DIRECTORY && folder !== configurationConflictDirectory) return false;
+			if (!await removeEmptyConflictFolder(folder)) return false;
+		}
+		if (stopped()) return false;
+		await normal.verifyConflictDirectory?.(path);
+		// The adapter must reject a nonempty directory, including a file added after listing.
+		await adapter.rmdir(path, false);
+		return true;
+	}
 	let remoteReader;
 	const mobileManifests = new Map();
 	const pluginManifest = relative => `${root}/${relative.split('/').slice(0, 2).join('/')}/manifest.json`;
@@ -338,8 +358,16 @@ export function configurationHost(vault, normal, scope, { stopped = () => false,
 		},
 		conflictPath: (path, sequence, digest) =>
 			isVirtual(path)
-				? `Smart Sync conflicts/configuration/${path.slice(CONFIG_NAMESPACE.length + 1)}.conflict-${sequence}-${digest.slice(0, 12)}.txt`
+				? `${configurationConflictDirectory}/${path.slice(CONFIG_NAMESPACE.length + 1)}.conflict-${sequence}-${digest.slice(0, 12)}.txt`
 				: undefined,
+		cleanupConflictFolders: async () => {
+			if (!adapter.list || !adapter.rmdir) return;
+			const configRoot = root.toLowerCase();
+			const conflictRoot = CONFLICT_DIRECTORY.toLowerCase();
+			if (configRoot === conflictRoot || configRoot.startsWith(`${conflictRoot}/`)) return;
+			// A busy, nonempty or inaccessible folder must never fail synchronization.
+			await removeEmptyConflictFolder(CONFLICT_DIRECTORY).catch(() => {});
+		},
 		list: async () => [
 			...(await normal.list()).filter((path) => !isVirtual(path)),
 			...(configurationFiles ?? await listConfiguration(root)),

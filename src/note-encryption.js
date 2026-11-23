@@ -2,15 +2,21 @@ import { Modal, Menu, Notice, Platform, editorInfoField } from 'obsidian';
 import { StateField, EditorState } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType, ViewPlugin } from '@codemirror/view';
 import { formatStorageSize, t } from './i18n.js';
+import { desktopFiles } from './desktop.js';
+import { createSecureEditor } from './secure-note-editor.js';
 import {
-	createLocked, openLocked, updateLocked, rewrapLocked, lockedMarker, lockedRanges,
-	decodeBox, encodeBox, replaceLocked, TEXT_PREFIX, containsLockedText, NOTE_LIMIT,
+	createLocked, createAttachmentRevision, openLocked, updateLocked, rewrapLocked, lockedMarker, lockedRanges,
+	decodeBox, encodeBox, replaceLocked, TEXT_PREFIX, containsLockedText, NOTE_LIMIT, NOTE_DRAFT_LIMIT,
 } from './note-crypto.js';
+import {
+	findNoteAttachments, stageNoteAttachments, stageImportedAttachments, parseAttachmentManifest, readAttachmentPackage,
+	finishAttachmentLock, verifyNoteAttachments, restoreNoteAttachments, decryptAttachment, attachmentPreviewType, attachmentPackagePath,
+} from './note-attachments.js';
 
 const failure = error => new Notice(error instanceof Error ? error.message : t('encryption.text02'));
 const button = (area, text, callback) => {
 	const el = area.createEl('button', { text, attr: { type: 'button' } });
-	el.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); callback(); });
+	el.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); callback(event); });
 	return el;
 };
 const fileIsNote = file => typeof file?.path === 'string' && file.path.toLowerCase().endsWith('.md');
@@ -36,6 +42,11 @@ class PasswordWindow extends Modal {
 			this.hint = field(t('encryption.text06'), 'text', 200);
 			this.hint.value = this.box?.hint ?? '';
 			this.contentEl.createEl('p', { text: t('encryption.text07') });
+			if (this.attachments?.length) {
+				this.contentEl.createEl('p', { text: t('encryption.attachmentConfirm', { count: this.attachments.length }) });
+				const list = this.contentEl.createEl('ul');
+				for (const file of this.attachments) list.createEl('li', { text: file.path });
+			}
 		} else if (this.box?.hint) {
 			button(this.contentEl, t('encryption.text08'), () => {
 				if (!this.hintShown) { this.hintShown = true; this.contentEl.createEl('p', { text: this.box.hint }); }
@@ -91,7 +102,10 @@ export class NoteEncryption {
 		this.addReadingAction = addReadingAction;
 		this.prompts = new Set(); this.sessions = new Set(); this.stopped = false;
 		this.pendingWrites = new Set(); this.busyFiles = new Set(); this.locks = new Map(); this.areas = new WeakMap();
+		this.viewWrites = new WeakMap();
+		this.widgetViews = new WeakMap();
 		this.volatileDrafts = new Map();
+		this.removingAttachments = new Set();
 		this.recoveryDir = `${this.app.vault.configDir}/plugins/${owner.manifest.id}/encrypted-drafts`;
 	}
 	addFileMenu(menu, file) {
@@ -155,21 +169,73 @@ export class NoteEncryption {
 		return this.encrypt({ ...snapshot, from, to: from + text.length }, 'text');
 	}
 	async encryptNote(file = this.app.workspace.getActiveFile()) {
-		return this.encrypt(await this.capture(file), 'note');
+		const snapshot = await this.capture(file);
+		if (lockedRanges(snapshot.original).some(range => range.box?.kind !== 'text')) throw Error(t('encryption.text24'));
+		if (await this.app.vault.read(file) !== snapshot.original) throw Error(t('encryption.attachmentIndex'));
+		const attachments = findNoteAttachments(this.app, snapshot);
+		return this.encrypt(snapshot, 'note', attachments);
 	}
-	encrypt(snapshot, kind) {
+	encrypt(snapshot, kind, attachments = []) {
 		const { original, from, to } = snapshot;
 		const ranges = lockedRanges(original);
-		if (ranges.some(range => range.box?.kind === 'note')) throw Error(t('encryption.text24'));
+		if (ranges.some(range => range.box?.kind !== 'text')) throw Error(t('encryption.text24'));
 		if (kind === 'text' && ranges.some(range => range.from < to && range.to > from)) throw Error(t('encryption.text25'));
-		new PasswordWindow(this, kind === 'note' ? t('encryption.encryptNote') : t('encryption.encryptSelection'), undefined, true, async (password, hint, active) => {
+		const prompt = new PasswordWindow(this, kind === 'note' ? t('encryption.encryptNote') : t('encryption.encryptSelection'), undefined, true, async (password, hint, active) => {
+			if (attachments.length) return this.attachmentOperation(async () => {
+				const latest = findNoteAttachments(this.app, snapshot);
+				if (latest.length !== attachments.length || latest.some(file => !attachments.includes(file))) throw Error(t('encryption.attachmentIndex'));
+				let staged, markerWritten = false;
+				try {
+					await this.verifyAttachmentPath(snapshot.path);
+					const box = await createLocked('', password, hint, 'bundle', async (id, key) => {
+						staged = await stageNoteAttachments(this.app.vault, id, key, original, latest, path => this.verifyAttachmentPath(path), { embedded: true });
+						return staged;
+					}, { embedded: true });
+					const opened = await openLocked(box, password);
+					await this.convert(snapshot, lockedMarker(box), active, async () => {
+						markerWritten = true;
+						await finishAttachmentLock(this.app, snapshot.path, box.id, opened.key, staged.manifest, active, file => this.removeAttachment(file), box.attachmentData);
+					});
+				} catch (error) {
+					if (markerWritten && active()) throw Error(`${t('encryption.attachmentFinish')} ${error.message}`, { cause: error });
+					throw error;
+				}
+			});
 			const box = await createLocked(original.slice(from, to), password, hint, kind);
 			if (!active()) throw Error(t('encryption.text26'));
 			const next = original.slice(0, from) + lockedMarker(box) + original.slice(to);
 			await this.convert(snapshot, next, active);
-		}).open();
+		});
+		prompt.attachments = attachments;
+		prompt.open();
 	}
-	async convert(snapshot, next, active) {
+	async attachmentOperation(task) {
+		if (!Platform.isMobile && this.app.vault.adapter?.getBasePath) {
+			const load = this.document?.defaultView?.require;
+			try { this.desktop ??= desktopFiles(this.app.vault, { load }); }
+			catch { throw Error(t('encryption.safeWriteUnavailable')); }
+			if (!this.desktop) throw Error(t('encryption.safeWriteUnavailable'));
+		}
+		if (this.owner.exclusive) {
+			if (this.owner.running) await this.owner.running.catch(() => {});
+			return this.owner.exclusive(task);
+		}
+		return task();
+	}
+	async verifyAttachmentPath(path, missing) {
+		try { await this.desktop?.verifyAttachmentPath(path, missing); }
+		catch { throw Error(t('encryption.attachmentChanged', { path })); }
+	}
+	async removeAttachment(file) {
+		const leaves = [];
+		this.app.workspace.iterateAllLeaves?.(leaf => { if (leaf.view?.file === file) leaves.push(leaf); });
+		for (const leaf of leaves) await leaf.setViewState({ type: 'empty' });
+		await this.verifyAttachmentPath(file.path);
+		this.removingAttachments.add(file);
+		try { await this.app.vault.delete(file, true); }
+		finally { this.removingAttachments.delete(file); }
+	}
+	async convert(snapshot, next, active, afterWrite) {
 		const { file, original, path } = snapshot;
 		if (this.busyFiles.has(file)) throw Error(t('encryption.text27'));
 		this.busyFiles.add(file);
@@ -188,6 +254,7 @@ export class NoteEncryption {
 			for (const { leaf } of states) await leaf.setViewState({ type: 'empty' });
 			await replaceLocked(this.app.vault, file, original, next, mtime, () => active() && file.path === path);
 			await this.forgetOldPlaintext(path);
+			await afterWrite?.();
 			new Notice(t('encryption.text30'));
 		} finally {
 			try {
@@ -208,9 +275,10 @@ export class NoteEncryption {
 	renderLock(area, path, marker, box, parentSession) {
 		this.areas.set(area, { path, marker, box, parentSession });
 		area.addClass('wujie-encrypted');
-		area.classList?.toggle('is-open', false); area.classList?.toggle('is-editing', false);
-		area.classList?.toggle('is-whole-note', box?.kind === 'note');
-		button(area, box?.kind === 'note' ? t('encryption.text31') : box ? t('encryption.text32') : t('encryption.text33'), () => {
+		area.classList?.remove('is-open', 'is-editing', 'is-unified');
+		const whole = box && box.kind !== 'text';
+		area.classList?.toggle('is-whole-note', Boolean(whole));
+		button(area, whole ? t('encryption.text31') : box ? t('encryption.text32') : t('encryption.text33'), () => {
 			if (box) this.unlock(area, path, marker, box, parentSession);
 		});
 		if (box) {
@@ -228,7 +296,8 @@ export class NoteEncryption {
 		this.closeActions();
 		const unlocked = this.sessions.has(session) && !session.locked;
 		const actions = unlocked ? [
-			[t('encryption.text35'), 'pencil', () => this.editSession(session)], [t('encryption.text36'), 'lock', () => this.lock(session)],
+			...(!session.editor ? [[t('encryption.text35'), 'pencil', () => this.editSession(session)]] : []),
+			[t('encryption.text36'), 'lock', () => this.lock(session)],
 		] : [[t('encryption.text37'), 'unlock', () => this.unlock(session.area, session.path, session.marker, session.box, session.parentSession)]];
 		actions.push([t('encryption.text38'), 'key-round', () => this.changePassword(session)], [t('encryption.text09'), 'unlock', () => this.permanent(session)]);
 		if (Platform.isMobile) { const modal = new EncryptionActions(this, actions); this.actionMenu = modal; modal.open(); return; }
@@ -240,16 +309,28 @@ export class NoteEncryption {
 	closeActions() { const menu = this.actionMenu; this.actionMenu = undefined; if (menu?.hide) menu.hide(); else menu?.close(); }
 	unlock(area, path, marker, box, parentSession) {
 		new PasswordWindow(this, t('encryption.text37'), box, false, async (password, _hint, active) => {
-			const opened = await openLocked(box, password);
+			const retainWrappingKey = !parentSession && box.kind !== 'text';
+			const opened = await openLocked(box, password, { retainWrappingKey });
 			if (!active() || !area.isConnected) return;
 			const file = this.app.vault.getAbstractFileByPath(path);
 			const source = parentSession ? parentSession.locked ? '' : parentSession.text : file ? await this.app.vault.read(file) : '';
 			const ranges = lockedRanges(source).filter(range => range.box?.id === box.id && encodeBox(range.box) === encodeBox(box));
 			if (ranges.length !== 1 || !active()) throw Error(t('encryption.text39'));
-			const session = { area, path, parentSession, marker: ranges[0].marker, box, key: opened.key, text: opened.text, epoch: this.epoch, lastUse: Date.now(), version: 0, saved: 0 };
+			const manifest = box.kind === 'bundle' ? parseAttachmentManifest(opened.text) : undefined;
+			let attachmentBytes;
+			if (manifest) {
+				if (manifest.restoring) throw Error(t('encryption.attachmentRestoring'));
+				attachmentBytes = box.v === 3
+					? await verifyNoteAttachments(this.app.vault, box.id, opened.key, manifest, box.attachmentData)
+					: await this.attachmentOperation(() => finishAttachmentLock(this.app, path, box.id, opened.key, manifest, active, file => this.removeAttachment(file)));
+				if (!active() || !area.isConnected || await this.app.vault.read(file) !== source) throw Error(t('encryption.text39'));
+			}
+			const session = { area, path, parentSession, marker: ranges[0].marker, box, key: opened.key, wrapKey: opened.wrapKey, text: manifest?.text ?? opened.text, manifest, attachmentBytes, epoch: this.epoch, lastUse: Date.now(), version: 0, saved: 0 };
 			this.areas.set(area, session);
 			this.sessions.add(session);
-			this.showSession(session);
+			session.unified = !parentSession && box.kind !== 'text' && !lockedRanges(session.text).length;
+			if (session.unified) this.editSession(session, false);
+			else this.showSession(session);
 		}).open();
 	}
 	showSession(session) {
@@ -266,6 +347,7 @@ export class NoteEncryption {
 			offset = range.to;
 		}
 		content.createSpan({ text: session.text.slice(offset) });
+		if (session.manifest) this.showAttachments(session);
 		const more = event => this.openActions(session, event);
 		content.addEventListener('click', event => {
 			if (event.target.closest?.('.wujie-encrypted') !== area || area.ownerDocument.getSelection()?.isCollapsed === false) return;
@@ -275,45 +357,280 @@ export class NoteEncryption {
 		const moreButton = button(area, '⋯', more); moreButton.addClass('wujie-crypto-more'); moreButton.setAttribute?.('aria-label', t('encryption.text34'));
 		area.oncontextmenu = more;
 	}
-	editSession(session) {
+	async showAttachments(session) {
+		const area = session.attachmentArea = session.area.createSpan({ cls: 'wujie-decrypted-attachments' });
+		const urls = session.urls = new Set();
+		for (const entry of session.manifest.entries) {
+			const item = area.createSpan({ cls: 'wujie-decrypted-attachment' });
+			item.createSpan({ text: entry.path });
+			const url = await this.attachmentImage(session, entry, urls);
+			if (url && session.urls === urls)
+				item.createEl('img', { attr: { src: url, alt: entry.path, draggable: 'false', loading: 'lazy' } });
+		}
+	}
+	async attachmentImage(session, entry, urls) {
+		const window = session.area.ownerDocument.defaultView;
+		const type = attachmentPreviewType(entry.path);
+		if (!type || session.urls !== urls || session.locked || !window?.URL?.createObjectURL) return;
+		try {
+			const clear = await decryptAttachment(session.attachmentBytes, session.box.id, session.key, entry);
+			try {
+				if (session.urls !== urls || session.locked || !session.area.isConnected) return;
+				const url = window.URL.createObjectURL(new window.Blob([clear], { type }));
+				urls.add(url);
+				return url;
+			} finally { clear.fill(0); }
+		} catch (error) {
+			if (!session.locked && session.urls === urls) failure(error);
+		}
+	}
+	async showInlineAttachments(session) {
+		const editor = session.editor, urls = session.urls = new Set(), images = [];
+		for (const entry of session.manifest.entries) {
+			const url = await this.attachmentImage(session, entry, urls);
+			if (session.urls !== urls || session.locked) return;
+			if (url) images.push({ path: entry.path, url });
+		}
+		if (session.editor === editor) editor.setImages(images);
+	}
+	clearAttachmentPreviews(session) {
+		const url = session.area.ownerDocument.defaultView?.URL;
+		for (const value of session.urls ?? []) url?.revokeObjectURL(value);
+		session.urls = undefined;
+		session.attachmentArea?.remove();
+		session.attachmentArea = undefined;
+	}
+	chooseAttachments(session) {
+		if (session.locked || !session.wrapKey) return;
+		this.cancelAttachmentPicker?.();
+		const document = session.area.ownerDocument;
+		const picker = document.body.createEl('input', { type: 'file' });
+		picker.multiple = true;
+		picker.hidden = true;
+		const dispose = () => {
+			document.removeEventListener('visibilitychange', selected);
+			picker.remove();
+			if (this.cancelAttachmentPicker === dispose) this.cancelAttachmentPicker = undefined;
+		};
+		const selected = () => {
+			if (document.hidden) return;
+			const files = [...picker.files ?? []];
+			dispose();
+			if (files.length) void this.saveAttachments(session, files).catch(failure);
+		};
+		this.cancelAttachmentPicker = dispose;
+		picker.addEventListener('cancel', dispose, { once: true });
+		picker.addEventListener('change', () => {
+			if (document.hidden) document.addEventListener('visibilitychange', selected);
+			else selected();
+		}, { once: true });
+		picker.click();
+	}
+	async saveAttachments(session, files) {
+		const active = () => !session.locked && session.area.isConnected && this.active(session.epoch);
+		if (!active() || !session.wrapKey) throw Error(t('encryption.importLocked'));
+		if (session.attachmentWork) throw Error(t('encryption.attachmentBusy'));
+		const saving = this.queueSave(session);
+		const work = saving.then(() => {
+			if (!active()) throw Error(t('encryption.importLocked'));
+			session.status?.setText(t('encryption.text43'));
+			return this.importAttachments(session, files, active);
+		}).catch(error => {
+			if (active() && session.saved === session.version) session.status?.setText('');
+			throw error;
+		}).finally(() => {
+			session.attachmentWork = undefined;
+			this.pendingWrites.delete(work);
+			if (!session.locked && session.saved !== session.version) void this.queueSave(session);
+		});
+		session.attachmentWork = work;
+		this.pendingWrites.add(work);
+		return work;
+	}
+	async importAttachments(session, files, active) {
+		await this.attachmentOperation(async () => {
+			const { vault } = this.app;
+			const file = vault.getAbstractFileByPath(session.path);
+			const previous = session.box;
+			const revision = session.version;
+			const canCommit = () => active() && session.box === previous && session.version === revision && session.saved === revision;
+			if (!fileIsNote(file) || !canCommit() || await vault.read(file) !== session.marker)
+				throw Error(t('encryption.writeContextChanged'));
+			await this.verifyAttachmentPath(session.path);
+			const { manifest, text, wrapKey } = session;
+			if (manifest?.restoring) throw Error(t('encryption.attachmentRestoring'));
+			const prior = manifest && {
+				id: previous.id, key: session.key, manifest, bytes: await readAttachmentPackage(vault, previous.id, manifest, previous.attachmentData),
+			};
+			let staged;
+			try {
+				let key;
+				if (!canCommit()) throw Error(t('encryption.writeContextChanged'));
+				const next = await createAttachmentRevision(previous, wrapKey, async (id, newKey) => {
+					key = newKey;
+					staged = await stageImportedAttachments(vault, id, key, text, session.path, files,
+						prior, (path, missing) => this.verifyAttachmentPath(path, missing), canCommit);
+					return staged;
+				});
+				for (const entry of staged.manifest.entries.slice(manifest?.entries.length ?? 0)) {
+					if (vault.getAbstractFileByPath(entry.path) || await vault.adapter.exists(entry.path))
+						throw Error(t('encryption.attachmentChanged', { path: entry.path }));
+				}
+				const marker = lockedMarker(next);
+				session.writingMarker = marker;
+				session.restoreInputFocus = session.editor?.view.hasFocus ?? false;
+				await this.replaceMarker(session, marker, false, canCommit);
+				session.box = next; session.marker = marker;
+				for (const other of this.sessions) {
+					if (other !== session && other.path === session.path) void this.lock(other);
+				}
+				const unchanged = session.version === revision;
+				if (!session.locked || !unchanged) {
+					session.key = key;
+					session.manifest = staged.manifest;
+					// Preserve edits made while the host completes the marker swap.
+					session.text = unchanged ? staged.manifest.text : session.text + '\n\n' + staged.manifest.text.slice(text.length).trimStart();
+				}
+				if (!session.locked) {
+					session.attachmentBytes = staged.bytes;
+					if (session.editor) {
+						session.editor.replace(session.text);
+						this.clearAttachmentPreviews(session);
+						void this.showInlineAttachments(session);
+					} else this.showSession(session);
+					session.status?.setText(t(unchanged ? 'encryption.attachmentsSaved' : 'encryption.text43'));
+				} else this.refreshLockedSession(session);
+				new Notice(t('encryption.attachmentsSaved'));
+			} finally {
+				session.writingMarker = undefined;
+			}
+			const oldPackage = previous.v === 2 && manifest && vault.getAbstractFileByPath(attachmentPackagePath(previous.id));
+			if (oldPackage) await this.removeAttachment(oldPackage).catch(failure);
+		});
+	}
+	editSession(session, focus = true) {
 		if (session.locked) return;
+		if (session.editor) {
+			if (focus) session.editor.view.focus();
+			return;
+		}
 		if ([...this.sessions].some(child => child.parentSession === session))
 			return this.flushChildren(session).then(() => this.editSession(session)).catch(failure);
+		this.clearAttachmentPreviews(session);
 		session.lastUse = Date.now(); session.area.empty();
 		session.area.oncontextmenu = null;
-		session.area.classList?.toggle('is-editing', true);
-		session.area.createDiv({ text: t('encryption.text41') });
-		const input = session.area.createEl('textarea', { cls: 'wujie-crypto-editor', attr: { 'aria-label': t('encryption.text42'), maxlength: String(NOTE_LIMIT), spellcheck: 'false', autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off' } });
-		input.value = session.text; session.input = input;
+		session.area.onpointerdown = session.area.onkeydown = () => { session.lastUse = Date.now(); };
+		session.area.classList?.add('is-open', 'is-editing');
+		session.area.classList?.toggle('is-unified', Boolean(session.unified));
+		const wholeNote = !session.parentSession && session.box.kind !== 'text';
+		const canAttach = wholeNote && Boolean(session.wrapKey);
+		session.area.createDiv({ cls: 'wujie-crypto-edit-hint', text: t(canAttach ? 'encryption.editWithAttachments' : 'encryption.editTextOnly') });
+		const toolbar = session.area.createDiv({ cls: 'wujie-crypto-formatting' });
+		const editorArea = session.area.createDiv({ cls: 'wujie-crypto-editor' });
 		session.status = session.area.createDiv({ attr: { role: 'status', 'aria-live': 'polite' } });
-		input.addEventListener('input', () => {
-			if (session.locked) return;
-			if (new TextEncoder().encode(input.value).length > NOTE_LIMIT) { input.value = session.text; session.status.setText(t('encryption.editTooLarge', { limit: formatStorageSize(NOTE_LIMIT) })); return; }
-			session.text = input.value; session.version++; session.lastUse = Date.now();
-			session.status.setText(t('encryption.text43')); this.queueSave(session);
+		const editor = session.editor = createSecureEditor(editorArea, session.text, {
+			label: t('encryption.text42'),
+			path: session.path,
+			onLimit: () => session.status.setText(t('encryption.editTooLarge', { limit: formatStorageSize(NOTE_LIMIT) })),
+			onChange: text => {
+				if (session.locked) return;
+				session.text = text; session.version++; session.lastUse = Date.now();
+				session.status.setText(t('encryption.text43')); this.queueSave(session);
+			},
 		});
+		const importFiles = (event, files) => {
+			if (!files?.length) return;
+			event.preventDefault();
+			event.stopPropagation();
+			if (canAttach) void this.saveAttachments(session, [...files]).catch(failure);
+			else new Notice(t('encryption.editTextOnly'));
+		};
+		editorArea.addEventListener('paste', event => importFiles(event, event.clipboardData?.files), true);
+		editorArea.addEventListener('dragover', event => {
+			if (!canAttach || !Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+			event.preventDefault();
+			event.stopPropagation();
+			event.dataTransfer.dropEffect = 'copy';
+		}, true);
+		editorArea.addEventListener('drop', event => importFiles(event, event.dataTransfer?.files), true);
+		const formats = [
+			['H2', 'heading', '## ', true], ['B', 'bold', '**'], ['I', 'italic', '*'],
+			['•', 'list', '- ', true], ['❝', 'quote', '> ', true], ['</>', 'code', '`'],
+		];
+		for (const [symbol, name, marker, lines] of formats) {
+			const action = button(toolbar, symbol, () => editor.format(marker, lines));
+			action.title = t(`encryption.format.${name}`);
+			action.setAttribute('aria-label', action.title);
+			action.addEventListener('mousedown', event => event.preventDefault());
+		}
+		if (canAttach) button(toolbar, t('encryption.addAttachments'), () => this.chooseAttachments(session));
+		if (session.unified) {
+			const more = button(toolbar, '⋯', event => this.openActions(session, event));
+			more.setAttribute('aria-label', t('encryption.text34'));
+		}
 		button(session.area, t('encryption.text44'), () => { void this.finishEditing(session); });
 		button(session.area, t('encryption.text36'), () => this.lock(session));
-		input.focus();
+		if (session.manifest) void this.showInlineAttachments(session);
+		this.watchRenderedEditor(session);
+		if (focus) editor.view.focus();
+	}
+	watchRenderedEditor(session) {
+		if (session.renderObserver || this.widgetViews.has(session.area)) return;
+		const view = this.app.workspace.getLeavesOfType('markdown').map(leaf => leaf.view)
+			.find(view => view?.file?.path === session.path && view.containerEl?.contains(session.area));
+		if (!view) return;
+		const { ownerDocument } = session.area;
+		const restore = () => {
+			if (session.locked || !session.editor || session.area.isConnected || view.file?.path !== session.path) return;
+			const replacements = [...view.containerEl.querySelectorAll('.wujie-encrypted')].filter(area => {
+				if (this.widgetViews.has(area)) return false;
+				const lock = this.areas.get(area);
+				return lock?.path === session.path && (lock.marker === session.writingMarker || lock.marker === session.marker);
+			});
+			if (replacements.length !== 1) return;
+			replacements[0].replaceWith(session.area);
+			if (session.restoreInputFocus && ownerDocument.activeElement === ownerDocument.body && ownerDocument.hasFocus())
+				session.editor.view.focus();
+			session.restoreInputFocus = false;
+		};
+		session.renderObserver = new ownerDocument.defaultView.MutationObserver(restore);
+		session.renderObserver.observe(view.containerEl, { childList: true, subtree: true });
+	}
+	stopWatchingRenderedEditor(session) {
+		session.renderObserver?.disconnect();
+		session.renderObserver = undefined;
+		session.restoreInputFocus = false;
 	}
 	async finishEditing(session) {
 		await this.queueSave(session);
-		if (!session.locked && session.saved === session.version) { session.input.value = ''; session.input = undefined; this.showSession(session); }
+		if (!session.locked && session.saved === session.version) {
+			if (session.unified) {
+				session.editor?.view.contentDOM.blur();
+				return;
+			}
+			this.stopWatchingRenderedEditor(session);
+			session.editor?.destroy();
+			session.editor = undefined;
+			this.clearAttachmentPreviews(session);
+			this.showSession(session);
+		}
 	}
 	queueSave(session) {
+		if (session.attachmentWork) return session.attachmentWork.catch(() => {});
 		if (session.work) return session.work;
 		if (session.saved === session.version) return Promise.resolve();
 		const work = (async () => {
 			while (session.saved < session.version) {
 				const version = session.version, text = session.text;
 				session.pendingBox = undefined;
-				const nextBox = await updateLocked(session.box, session.key, text);
+				const nextBox = await updateLocked(session.box, session.key, session.manifest ? JSON.stringify({ ...session.manifest, text }) : text);
 				const nextMarker = lockedMarker(nextBox);
 				session.pendingBox = nextBox;
 				// Journal contains ciphertext only, including when a concurrent edit prevents saving.
 				await this.writeDraft(session, nextBox);
 				try {
 					session.writingMarker = nextMarker;
+					session.restoreInputFocus = session.editor?.view.hasFocus ?? false;
 					const preserveTime = session.preserveTime === true;
 					session.preserveTime = false;
 					await this.replaceMarker(session, nextMarker, preserveTime);
@@ -322,7 +639,7 @@ export class NoteEncryption {
 					session.pendingBox = undefined;
 					session.writingMarker = undefined;
 					await this.removeDraft(session.box.id);
-					if (!session.locked) session.status?.setText(t('encryption.text45'));
+					if (!session.locked) session.status?.setText('');
 				} catch {
 					session.draft = nextBox;
 					if (!session.locked) session.status?.setText(t('encryption.text46'));
@@ -333,7 +650,7 @@ export class NoteEncryption {
 		})().catch(() => {
 			// Never announce durability when the encrypted journal itself failed.
 			session.failed = true;
-			if (session.pendingBox) this.volatileDrafts.set(session.box.id, session.pendingBox);
+			if (session.pendingBox) this.volatileDrafts.set(session.box.id, this.draftEntry(session, session.pendingBox));
 			if (!session.locked) session.status?.setText(t('encryption.text48'));
 			new Notice(t('encryption.text49'));
 		}).finally(() => {
@@ -369,10 +686,21 @@ export class NoteEncryption {
 			if (ranges.length !== 1) throw Error(t('encryption.text56'));
 			const range = ranges[0];
 			const nextText = current.slice(0, range.from) + next + current.slice(range.to);
+			const openViews = () => this.app.workspace.getLeavesOfType('markdown')
+				.map(leaf => leaf.view).filter(view => view?.file === file);
+			const content = view => view.getViewData?.() ?? view.editor?.getValue();
+			const unchanged = () => openViews().every(view => content(view) === current);
 			// An editor containing newer unsaved surrounding text must not be overwritten.
-			for (const leaf of this.app.workspace.getLeavesOfType('markdown'))
-				if (leaf.view?.file === file && leaf.view.editor?.getValue() !== current) throw Error(t('encryption.text57'));
-			await replaceLocked(this.app.vault, file, current, nextText, preserveTime ? file.stat.mtime : undefined, active);
+			if (!unchanged()) throw Error(t('encryption.text57'));
+			this.viewWrites.set(file, { current, next: nextText });
+			try {
+				await replaceLocked(this.app.vault, file, current, nextText, preserveTime ? file.stat.mtime : undefined,
+					() => active() && unchanged());
+				// Obsidian may update the saved baseline before refreshing the live editor.
+				for (const view of openViews()) {
+					if (content(view) === current) view.setViewData?.(nextText, false);
+				}
+			} finally { this.viewWrites.delete(file); }
 			return nextText;
 		});
 		this.locks.set(file, write);
@@ -401,7 +729,9 @@ export class NoteEncryption {
 			await this.flushChildren(session);
 			await this.queueSave(session);
 			if (session.saved !== session.version) throw Error(t('encryption.text59'));
-			const { text } = await openLocked(session.box, password);
+			const opened = await openLocked(session.box, password);
+			if (session.box.kind === 'bundle') return this.attachmentOperation(() => this.restoreAttachmentBundle(session, opened, active));
+			const { text } = opened;
 			if (!active()) return;
 			const saved = await this.replaceMarker(session, text, true, active);
 			if (!session.parentSession && !containsLockedText(saved)) {
@@ -413,10 +743,43 @@ export class NoteEncryption {
 			new Notice(t('encryption.text61'));
 		}).open();
 	}
+	async restoreAttachmentBundle(session, opened, active) {
+		const manifest = parseAttachmentManifest(opened.text);
+		await this.verifyAttachmentPath(session.path);
+		await restoreNoteAttachments(this.app.vault, session.box.id, opened.key, manifest, active,
+			(path, missing) => this.verifyAttachmentPath(path, missing), {
+				attachmentData: session.box.attachmentData,
+				beforeRestore: async () => {
+					if (manifest.restoring) return;
+					const box = await updateLocked(session.box, opened.key, JSON.stringify({ ...manifest, restoring: true }));
+					const marker = lockedMarker(box);
+					session.writingMarker = marker;
+					try {
+						await this.replaceMarker(session, marker, true, active);
+						session.box = box; session.marker = marker;
+					} finally { session.writingMarker = undefined; }
+				},
+			});
+		const saved = await this.replaceMarker(session, manifest.text, true, active);
+		if (!containsLockedText(saved)) {
+			for (const state of Object.values(this.owner.data?.connections ?? {})) if (state.localEncryption) delete state.localEncryption[session.path];
+			if (this.owner.data) await this.owner.saveData(this.owner.data);
+		}
+		this.clearSession(session);
+		const pack = session.box.v === 2 && this.app.vault.getAbstractFileByPath(attachmentPackagePath(session.box.id));
+		if (pack) await this.removeAttachment(pack);
+		new Notice(t('encryption.text61'));
+	}
 	clearSession(session, retaining = false) {
 		this.closeActions();
 		session.locked = true;
-		if (session.input) session.input.value = '';
+		session.wrapKey = undefined;
+		this.stopWatchingRenderedEditor(session);
+		this.clearAttachmentPreviews(session);
+		session.attachmentBytes = undefined;
+		session.manifest = session.work || session.saved !== session.version ? session.manifest : undefined;
+		session.editor?.destroy();
+		session.editor = undefined;
 		session.area.empty(); this.sessions.delete(session);
 		if (!retaining && !session.work && !session.failed) { session.text = ''; session.key = undefined; }
 	}
@@ -440,9 +803,9 @@ export class NoteEncryption {
 		this.clearSession(session, true);
 		this.renderLock(session.area, session.path, session.marker, session.box, session.parentSession);
 		this.areas.get(session.area).lockOwner = session;
-		const lockWork = Promise.all(childWork).then(() => this.queueSave(session)).finally(() => {
+		const lockWork = Promise.all([...childWork, session.attachmentWork?.catch(() => {})]).then(() => this.queueSave(session)).finally(() => {
 			session.closing = false;
-			if (!session.failed || session.pendingBox) { session.text = ''; session.key = undefined; }
+			if (!session.failed || session.pendingBox) { session.text = ''; session.key = undefined; session.manifest = undefined; }
 			this.pendingWrites.delete(lockWork);
 			this.refreshLockedSession(session);
 		});
@@ -460,7 +823,8 @@ export class NoteEncryption {
 		for (const session of [...this.sessions]) {
 			const open = this.app.workspace.getLeavesOfType('markdown').some(leaf => leaf.view?.file?.path === session.path);
 			const idle = this.owner.data?.encryptionPreferences?.idleMinutes ?? 5;
-			if (!session.area.isConnected || !open || idle > 0 && Date.now() - session.lastUse >= idle * 60_000) this.lock(session);
+			const refreshing = session.writingMarker && session.renderObserver && (session.work || session.attachmentWork);
+			if ((!session.area.isConnected && !refreshing) || !open || idle > 0 && Date.now() - session.lastUse >= idle * 60_000) this.lock(session);
 		}
 	}
 	async writeDraft(session, box) {
@@ -471,7 +835,22 @@ export class NoteEncryption {
 			parent = parent ? parent + '/' + part : part;
 			if (!await adapter.exists(parent)) await adapter.mkdir(parent);
 		}
-		await adapter.write(`${this.recoveryDir}/${box.id}.json`, JSON.stringify({ format: 1, source: session.path, box }));
+		await adapter.write(`${this.recoveryDir}/${box.id}.json`, JSON.stringify(this.draftEntry(session, box)));
+	}
+	draftEntry(session, box) {
+		return { format: 1, source: session.path, iv: session.box.iv, wrapIV: session.box.wrapIV, box };
+	}
+	async recoverDraftEntry(entry, box) {
+		const { vault } = this.app;
+		if (box.kind !== 'bundle' || box.v === 3) return vault.create(`${t('encryption.recoveredName')}-${box.id}-${Date.now()}.md`, lockedMarker(box));
+		const file = vault.getAbstractFileByPath(entry.source);
+		if (!fileIsNote(file)) throw Error(t('encryption.writeContextChanged'));
+		const current = await vault.read(file);
+		const [range] = lockedRanges(current);
+		if (range?.box?.id !== box.id || range.marker !== current || range.box.iv !== entry.iv || range.box.wrapIV !== entry.wrapIV)
+			throw Error(t('encryption.writeContextChanged'));
+		await this.convert({ file, original: current, path: file.path }, lockedMarker(box), () => !this.stopped);
+		return file;
 	}
 	async removeDraft(id) {
 		if (!safeId(id)) return;
@@ -484,8 +863,8 @@ export class NoteEncryption {
 		if (!files.length && !this.volatileDrafts.size) { new Notice(t('encryption.text64')); return; }
 		const modal = new Modal(this.app); modal.setTitle(t('encryption.text65'));
 		modal.contentEl.createEl('p', { text: t('encryption.text66') });
-		for (const [id, box] of this.volatileDrafts) button(modal.contentEl, t('encryption.text67'), () => { void (async () => {
-			const file = await this.app.vault.create(`${t('encryption.recoveredName')}-${id}-${Date.now()}.md`, lockedMarker(box));
+		for (const [id, entry] of this.volatileDrafts) button(modal.contentEl, t('encryption.text67'), () => { void (async () => {
+			const file = await this.recoverDraftEntry(entry, entry.box);
 			this.volatileDrafts.delete(id); await this.app.workspace.getLeaf(false).openFile(file); modal.close();
 		})().catch(failure); });
 		for (const path of files) {
@@ -493,10 +872,10 @@ export class NoteEncryption {
 			const row = modal.contentEl.createDiv();
 			button(row, t('encryption.text68'), () => { void (async () => {
 				const raw = await adapter.read(path);
-				if (raw.length > 5 * 1024 * 1024) throw Error(t('encryption.text69'));
+				if (raw.length > NOTE_DRAFT_LIMIT) throw Error(t('encryption.text69'));
 				const entry = JSON.parse(raw), box = decodeBox(encodeBox(entry.box));
 				if (entry.format !== 1) throw Error(t('encryption.text69'));
-				const file = await this.app.vault.create(`${t('encryption.recoveredName')}-${box.id}-${Date.now()}.md`, lockedMarker(box));
+				const file = await this.recoverDraftEntry(entry, box);
 				await adapter.remove(path); await this.app.workspace.getLeaf(false).openFile(file); modal.close();
 			})().catch(failure); });
 		}
@@ -517,20 +896,30 @@ export class NoteEncryption {
 		})().catch(failure); });
 		modal.open();
 	}
-	dispose() { this.lockAll(); this.stopped = true; }
+	dispose() { this.cancelAttachmentPicker?.(); this.lockAll(); this.stopped = true; }
 }
 
 class LockWidget extends WidgetType {
 	constructor(manager, marker, box) { super(); Object.assign(this, { manager, marker, box }); }
 	eq(other) { return other.marker === this.marker && other.manager === this.manager; }
 	toDOM(view) {
-		const area = view.dom.ownerDocument.createElement('span');
 		const file = editorInfoField ? view.state.field(editorInfoField, false)?.file : undefined;
+		// CodeMirror can recreate the widget when Obsidian refreshes the saved
+		// marker. Keep the active secure editor attached to its own note.
+		for (const session of this.manager.sessions) {
+			if (session.path === file?.path && !session.parentSession && !session.locked &&
+				(session.writingMarker === this.marker || session.marker === this.marker) &&
+				this.manager.widgetViews.get(session.area) === view) return session.area;
+		}
+		const area = view.dom.ownerDocument.createElement('span');
+		this.manager.widgetViews.set(area, view);
 		this.manager.renderLock(area, file?.path, this.marker, this.box);
+		area.addClass('wujie-crypto-source-lock');
 		return area;
 	}
 	updateDOM(area) {
 		const current = this.manager.areas.get(area);
+		if (current?.writingMarker === this.marker && this.manager.sessions.has(current) && !current.locked) return true;
 		if (current?.box?.id !== this.box?.id) return false;
 		if (this.manager.sessions.has(current) && !current.locked) {
 			if (current.marker === this.marker || current.writingMarker === this.marker) return true;
@@ -544,7 +933,9 @@ class LockWidget extends WidgetType {
 	ignoreEvent() { return true; }
 	destroy(area) {
 		const session = this.manager.areas.get(area);
-		if (this.manager.sessions.has(session)) this.manager.lock(session);
+		if (this.manager.sessions.has(session)) queueMicrotask(() => {
+			if (!area.isConnected && this.manager.sessions.has(session)) this.manager.lock(session);
+		});
 	}
 }
 
@@ -559,8 +950,13 @@ export function encryptionExtension(manager, addSelectionAction) {
 	});
 	const protect = EditorState.transactionFilter.of(transaction => {
 		if (!transaction.docChanged) return transaction;
+		const file = editorInfoField ? transaction.startState.field(editorInfoField, false)?.file : undefined;
+		const permitted = file && manager.viewWrites.get(file);
+		const source = transaction.startState.doc.toString();
+		// Obsidian refreshes the view with a minimal diff, which can be inside a marker.
+		if (permitted?.current === source && permitted.next === transaction.newDoc.toString()) return transaction;
 		let partial = false;
-		const ranges = lockedRanges(transaction.startState.doc.toString());
+		const ranges = lockedRanges(source);
 		transaction.changes.iterChangedRanges((from, to) => {
 			if (ranges.some(range => from > range.from && from < range.to || to > range.from && to < range.to)) partial = true;
 		});
@@ -616,7 +1012,9 @@ export function registerNoteEncryption(owner, addSelectionAction, addReadingActi
 		owner.registerEvent(workspace.on('file-menu', (menu, file) => manager.addFileMenu(menu, file)));
 		owner.registerEvent(workspace.on('layout-change', () => manager.sweep()));
 	}
-	if (owner.app.vault.on) for (const event of ['rename', 'delete']) owner.registerEvent(owner.app.vault.on(event, () => manager.lockAll()));
+	if (owner.app.vault.on) for (const event of ['rename', 'delete']) owner.registerEvent(owner.app.vault.on(event, file => {
+		if (event !== 'delete' || !manager.removingAttachments.has(file)) manager.lockAll();
+	}));
 	manager.document = workspace.containerEl?.ownerDocument;
 	if (manager.document && owner.registerDomEvent) {
 		owner.registerDomEvent(manager.document, 'contextmenu', event => manager.readingMenu(event), true);
@@ -628,7 +1026,8 @@ export function registerNoteEncryption(owner, addSelectionAction, addReadingActi
 	owner.registerMarkdownCodeBlockProcessor?.('wujie-encrypted', (source, el, ctx) => {
 		let box; try { box = decodeBox(source.trim()); } catch { /* Opaque damaged envelope. */ }
 		const marker = box ? lockedMarker(box) : '';
-		manager.renderLock(el, ctx.sourcePath, marker, box?.kind === 'note' ? box : undefined);
+		manager.renderLock(el, ctx.sourcePath, marker, box?.kind !== 'text' ? box : undefined);
+		el.addClass('wujie-crypto-rendered-lock');
 	});
 	owner.registerMarkdownPostProcessor?.((el, ctx) => {
 		const doc = el.ownerDocument;

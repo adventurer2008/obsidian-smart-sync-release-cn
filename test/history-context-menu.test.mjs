@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { registerHooks } from 'node:module';
-import { syntheticApp, TFile, TFolder, Menu } from './obsidian-double.mjs';
+import { syntheticApp, TFile, TFolder, Menu, modals } from './obsidian-double.mjs';
 import { t } from '../src/i18n.js';
 
+const sdk = 'data:text/javascript,' + encodeURIComponent(`
+ export * from ${JSON.stringify(new URL('./obsidian-double.mjs', import.meta.url).href)};
+ export class EditableFileView {}
+ export class FuzzySuggestModal {}
+`);
 registerHooks({ resolve(specifier, context, next) {
  return specifier === 'obsidian'
-  ? { url: new URL('./obsidian-double.mjs', import.meta.url).href, shortCircuit: true }
+  ? { url: sdk, shortCircuit: true }
   : next(specifier, context);
 } });
 globalThis.window = { setInterval, clearInterval, setTimeout, clearTimeout };
@@ -48,7 +53,19 @@ test('Navigator menus use their clicked file or selection and detach when either
  app.workspace.onLayoutReady = callback => layoutReady.push(callback);
  app.workspace.getActiveFile = () => new TFile('active.md');
  app.plugins = { plugins: { 'notebook-navigator': { api: {} } } };
+ const word = new TFile('folder/report.DOCX'), book = new TFile('folder/book.EPUB'), folder = new TFolder('folder');
+ const entries = new Map([word, book, folder].map(file => [file.path, file]));
+ app.vault.getAbstractFileByPath = path => entries.get(path) ?? null;
+ const opened = [];
+ const leaf = {
+  view: { requestProtection() { opened.push(['encrypt', leaf.state.state.file]); } },
+  async setViewState(state) { this.state = state; opened.push([state.type, state.state.file]); }
+ };
+ app.workspace.getLeaf = () => leaf;
+ app.workspace.getLeavesOfType = () => [];
+ app.workspace.revealLeaf = () => {};
  const plugin = new Plugin(app, { id: 'wujie-sync', version: 'synthetic' });
+ plugin.register = () => {};
  await plugin.onload();
  context.after(() => { if (!plugin.stopped) plugin.dispose(); });
 
@@ -87,7 +104,26 @@ test('Navigator menus use their clicked file or selection and detach when either
  multiple[1].callback();
  assert.deepEqual(calls, [['history', clicked.path], ['encrypt', clicked], ['bottom', [clicked, other], true]]);
  assert.deepEqual(render(first.file, { file: new TFile('image.png') }).map(item => item.title), [explorer('pin.pin'), explorer('pin.bottom')]);
- assert.deepEqual(render(first.folder, { folder: new TFolder('folder') }).map(item => item.title), [explorer('pin.pin'), explorer('pin.bottom')]);
+
+ const wordItems = render(first.file, { file: word });
+ const bookItems = render(first.file, { file: book });
+ const folderItems = render(first.folder, { folder });
+ assert.deepEqual(wordItems.map(item => item.title), [explorer('pin.pin'), explorer('pin.bottom'), t('docx.open'), t('encryption.text11')]);
+ assert.deepEqual(bookItems.map(item => item.title), [explorer('pin.pin'), explorer('pin.bottom'), t('epub.open')]);
+ assert.deepEqual(folderItems.map(item => item.title), [explorer('pin.pin'), explorer('pin.bottom'), t('docx.new')]);
+ assert.deepEqual(render(first.file, { file: word, selection: { mode: 'multiple', files: [word, book] } }).map(item => item.title),
+  [explorer('pin.pin'), explorer('pin.bottom')]);
+ await wordItems[2].callback();
+ await wordItems[3].callback();
+ await bookItems[2].callback();
+ assert.deepEqual(opened, [['wujie-sync-docx', word.path], ['wujie-sync-docx', word.path], ['encrypt', word.path], ['wujie-sync-epub', book.path]]);
+ folderItems[2].callback();
+ assert.equal(modals.at(-1).folder, folder);
+ for (const [entry, titles] of [[word, [t('docx.open'), t('encryption.text11')]], [book, [t('epub.open')]], [folder, [t('docx.new')]]]) {
+  const native = new Menu();
+  for (const callback of events['file-menu']) callback(native, entry);
+  assert.deepEqual(native.items.slice(2).map(item => item.title), titles);
+ }
 
  const replacement = menus();
  app.plugins.plugins['notebook-navigator'].api.menus = replacement;

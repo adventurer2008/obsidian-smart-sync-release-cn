@@ -1,6 +1,6 @@
 {
   "name": "obsidian-smart-client",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -21,12 +21,23 @@
     "@codemirror/state": "6.7.6",
     "@codemirror/view": "6.43.13",
     "esbuild": "0.28.1",
-    "jsdom": "26.1.0"
+    "jsdom": "26.1.0",
+    "rrweb-cssom": "0.8.0"
   },
   "dependencies": {
+    "@codemirror/commands": "6.8.1",
+    "@eigenpal/docx-editor-core": "1.9.0",
+    "@eigenpal/docx-editor-i18n": "1.9.0",
+    "@eigenpal/docx-editor-react": "1.9.0",
+    "@lezer/common": "1.5.0",
+    "@lezer/markdown": "1.8.1",
     "@noble/ed25519": "3.2.0",
+    "@noble/hashes": "2.0.1",
+    "cfb": "1.2.2",
     "fflate": "0.8.3",
-    "node-diff3": "3.2.1"
+    "node-diff3": "3.2.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "description": "Shared Client source for Wujie Sync and Smart Sync regional builds.",
   "repository": {

@@ -1,14 +1,97 @@
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { mkdir, mkdtemp, readdir, readFile, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
 	cleanConfiguration,
 	configurationScope,
 	configurationHost,
 	CONFIG_NAMESPACE,
+	CONFLICT_DIRECTORY,
 } from '../src/configuration.js';
+import { desktopFiles } from '../src/desktop.js';
+import { emptyState, NotebookSynchronizer } from '../src/synchronizer.js';
 import { messages, englishDraft, t, localizedFailure, createTranslator } from '../src/i18n.js';
 import { TaskJournal } from '../src/tasks.js';
 import { diagnosticReport } from '../src/planning.js';
+
+test('synchronization and conflict resolution clean empty local recovery folders without removing files', async t => {
+	const base = await mkdtemp(join(tmpdir(), 'smart-sync-conflicts-'));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	const configFolder = `${CONFLICT_DIRECTORY}/configuration`;
+	const legacyFolder = `${configFolder}/plugins/example`;
+	const listed = [], removed = [];
+	let addDuringRemoval = false;
+	const adapter = {
+		getBasePath: () => base,
+		exists: path => stat(join(base, path)).then(() => true, () => false),
+		list: async path => {
+			listed.push(path);
+			const entries = await readdir(join(base, path), { withFileTypes: true });
+			return {
+				files: entries.filter(entry => entry.isFile()).map(entry => `${path}/${entry.name}`),
+				folders: entries.filter(entry => !entry.isFile()).map(entry => `${path}/${entry.name}`),
+			};
+		},
+		rmdir: async (path, recursive) => {
+			assert.equal(recursive, false);
+			if (addDuringRemoval) await writeFile(join(base, path, '.new-copy'), 'new recovery data');
+			await rmdir(join(base, path));
+			removed.push(path);
+		},
+	};
+	const vault = { configDir: '.obsidian', adapter };
+	const { verifyConflictDirectory } = desktopFiles(vault, { load: createRequire(import.meta.url) });
+	const host = configurationHost(vault, {
+		verifyConflictDirectory,
+		remove: path => rm(join(base, path)),
+	}, configurationScope());
+	const state = emptyState();
+	const engine = new NotebookSynchronizer({
+		api: { feed: async () => ({ entries: [], more: false }) },
+		direction: 'receive', host, state, save: async () => {},
+	});
+
+	await mkdir(join(base, legacyFolder), { recursive: true });
+	await mkdir(join(base, 'Ordinary empty folder'));
+	await engine.run();
+	assert.deepEqual(removed, [legacyFolder, `${configFolder}/plugins`, configFolder, CONFLICT_DIRECTORY]);
+	assert.equal(await adapter.exists('Ordinary empty folder'), true);
+
+	const path = `${CONFIG_NAMESPACE}/appearance.json`;
+	const copy = host.conflictPath(path, 7, 'a'.repeat(64));
+	await mkdir(join(base, configFolder), { recursive: true });
+	await writeFile(join(base, copy), 'unresolved recovery data');
+	state.conflicts.push({ path, copy, sequence: 7 });
+	await engine.run();
+	assert.equal(await readFile(join(base, copy), 'utf8'), 'unresolved recovery data');
+	await engine.resolve(copy, 'both');
+	await engine.run();
+	assert.equal(await readFile(join(base, copy), 'utf8'), 'unresolved recovery data');
+	state.conflicts.push({ path, copy, sequence: 7 });
+	await engine.resolve(copy, 'remote');
+	assert.equal(await adapter.exists(CONFLICT_DIRECTORY), false);
+	assert.equal(state.conflicts.length, 0);
+
+	await mkdir(join(base, CONFLICT_DIRECTORY));
+	addDuringRemoval = true;
+	await engine.run();
+	assert.equal(await readFile(join(base, CONFLICT_DIRECTORY, '.new-copy'), 'utf8'), 'new recovery data');
+	addDuringRemoval = false;
+	await rm(join(base, CONFLICT_DIRECTORY, '.new-copy'));
+	await symlink(join(base, 'Ordinary empty folder'), join(base, configFolder), 'junction');
+	listed.length = 0;
+	await engine.run();
+	assert.deepEqual(listed, [CONFLICT_DIRECTORY]);
+	assert.equal(await adapter.exists('Ordinary empty folder'), true);
+	await rm(join(base, configFolder));
+	await mkdir(join(base, legacyFolder), { recursive: true });
+	const mobileHost = configurationHost(vault, {}, configurationScope({ mobile: true }));
+	await mobileHost.cleanupConflictFolders();
+	assert.equal(await adapter.exists(CONFLICT_DIRECTORY), false);
+});
 
 test('configuration inventory fingerprints detect additions edits and removals without reading unchanged bodies', async () => {
 	const files = new Map([['custom/app.json', { size: 2, mtime: 10, ctime: 1 }]]);
@@ -243,7 +326,7 @@ test('Chinese product messages contain no English prose or confirmation words', 
 	for (const [key, value] of Object.entries(messages)) {
 		if (key === 'overview.spaceMiB') { assert.equal(value, '{value} MB'); continue; }
 		if (key === 'overview.spaceGiB') { assert.equal(value, '{value} GB'); continue; }
-		const text = value.replace(/\{[^}]+\}/g, '').replace(/Obsidian|Smart Sync|Google|GitHub|Markdown|EPUB/g, '').replace(/\b(?:KB|MB|GB|B)\b|\/s/g, '');
+		const text = value.replace(/\{[^}]+\}/g, '').replace(/Obsidian|Smart Sync|Google|GitHub|Markdown|EPUB|\bWord\b/g, '').replace(/\b(?:KB|MB|GB|B)\b|\/s/g, '');
 		assert.equal(/[A-Za-z]/.test(text), false, key + ': ' + value);
 	}
 });

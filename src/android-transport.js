@@ -12,7 +12,7 @@ export function supportsAndroidNativeVersion(version) {
 }
 
 // CHG-20261029-ANDROID-FALLBACK: memory-only, same-authority Android compatibility.
-export function androidFallback({ android, origin, requestUrl, fetcher = fetch, getPin = () => undefined, savePin = async () => {}, onDiagnostic = () => {}, runtime = {} }) {
+export function androidFallback({ android, origin, audience = origin, requestUrl, fetcher = fetch, getPin = () => undefined, savePin = async () => {}, onDiagnostic = () => {}, runtime = {} }) {
 	if (!android || typeof requestUrl !== 'function' || new URL(origin).protocol !== 'https:') return fetcher;
 	let native = false, selecting, active = 0;
 	const traceId = crypto.randomUUID();
@@ -79,7 +79,7 @@ export function androidFallback({ android, origin, requestUrl, fetcher = fetch, 
 		const started = Date.now();
 		diagnostic('native-probe-start');
 		try {
-			const pin = await verifyService(origin, getPin(), nativeFetch, 5000, signal);
+			const pin = await verifyService(origin, getPin(), nativeFetch, 5000, signal, audience);
 			aborted(signal);
 			if (!getPin()) await savePin(pin);
 			aborted(signal);

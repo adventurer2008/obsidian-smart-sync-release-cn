@@ -33,8 +33,8 @@ function checksum(bytes) {
 	return (value ^ 0xffffffff) >>> 0;
 }
 
-function archive(bytes) {
-	if (bytes.length > EPUB_MAX_BYTES) fail('large');
+export function openZipArchive(bytes, maxBytes = EPUB_MAX_BYTES) {
+	if (bytes.length > maxBytes) fail('large');
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const u16 = offset => view.getUint16(offset, true);
 	const u32 = offset => view.getUint32(offset, true);
@@ -69,6 +69,8 @@ function archive(bytes) {
 	if (at !== end) fail();
 	return {
 		has: path => entries.has(path),
+		names: () => entries.keys(),
+		size: path => entries.get(path)?.size,
 		read(path, limit = MARKUP_BYTES) {
 			const entry = entries.get(path);
 			if (!entry) fail();
@@ -130,7 +132,7 @@ const imageTypes = new Set(['image/jpeg', 'image/png']);
 const obfuscation = new Set(['http://www.idpf.org/2008/embedding', 'http://ns.adobe.com/pdf/enc#RC']);
 
 export function openEpub(bytes, Parser) {
-	const zip = archive(bytes);
+	const zip = openZipArchive(bytes);
 	if (textDecoder.decode(zip.read('mimetype', 32)) !== 'application/epub+zip') fail();
 	if (zip.has('META-INF/encryption.xml')) {
 		const encrypted = markup(zip.read('META-INF/encryption.xml'), Parser);
