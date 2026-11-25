@@ -40,6 +40,7 @@ const { NoteEncryption, encryptionExtension } = await import('../src/note-encryp
 const { editorInfoField, modals, menus, Platform } = await import('./encryption-dom-sdk.mjs');
 const { EditorState } = await import('@codemirror/state');
 const { EditorView } = await import('@codemirror/view');
+const { deleteCharBackward, deleteCharForward, history, undo, redo } = await import('@codemirror/commands');
 const edit = (view, text) => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
 const contents = view => view.state.doc.toString();
 after(() => { dom.window.close(); assert.deepEqual(domErrors, [], 'DOM/CodeMirror asynchronous errors must not be ignored'); });
@@ -91,7 +92,9 @@ async function fixture(kind = 'text', original = '初始秘密', { refreshInProc
 		posToOffset: value => value,
 	};
 	const info = { file, editor };
-	const applyViewText = text => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+	const applyViewText = (text, userEvent) => view.dispatch({
+		changes: { from: 0, to: view.state.doc.length, insert: text }, userEvent,
+	});
 	const markdownView = {
 		file, editor, getViewData: editor.getValue,
 		setViewData(text) {
@@ -107,17 +110,19 @@ async function fixture(kind = 'text', original = '初始秘密', { refreshInProc
 		vault: { configDir: '.fixture', read: async () => disk, getAbstractFileByPath: path => path === file.path ? file : null,
 			process: async (_file, change, options) => {
 				disk = change(disk); file.stat.mtime = options?.mtime ?? Date.now();
-				if (refreshInProcess) applyViewText(disk);
+				info.lastSavedData = disk;
+				if (refreshInProcess) applyViewText(disk, 'set');
 				return disk;
 			},
 			adapter: { exists: async path => dirs.has(path) || drafts.has(path), mkdir: async path => dirs.add(path), write: async (path, raw) => drafts.set(path, raw), remove: async path => drafts.delete(path) },
 		},
 		workspace: { getLeavesOfType: () => [{ view: markdownView }] },
 	};
-	const manager = new NoteEncryption({ app, manifest: { id: 'wujie-sync' }, data: {} });
+	const manager = new NoteEncryption({ app, manifest: { id: 'wujie-sync' }, data: {}, async saveData() {} });
 	const container = document.body.createDiv();
-	view = new EditorView({ state: EditorState.create({ doc: disk, extensions: [editorInfoField, encryptionExtension(manager)] }), parent: container });
-	return { manager, view, file, box, container, drafts, read: () => disk, dispose() { manager.dispose(); view.destroy(); container.remove(); } };
+	view = new EditorView({ state: EditorState.create({ doc: disk, extensions: [editorInfoField, history(), EditorView.contentAttributes.of({ contenteditable: 'true' }), encryptionExtension(manager)] }), parent: container });
+	return { manager, view, file, box, container, drafts, read: () => disk, applyViewText,
+		dispose() { manager.dispose(); view.destroy(); container.remove(); } };
 }
 async function submit() {
 	const prompt = modals.at(-1); prompt.password.value = password; await prompt.run(); assert.equal(prompt.closed, true);
@@ -192,6 +197,7 @@ for (const connected of [false, true]) test(
 		assert.equal(disk, range.marker);
 		assert.equal(files.size, 1, 'failed import leaves the former encrypted note in place');
 
+		session.editor.view.dispatch({ selection: { anchor: body.indexOf('\n') } });
 		[...area.querySelectorAll('button')].find(el => el.textContent === '添加附件').click();
 		const picker = document.querySelector('input[type=file]');
 		assert.ok(picker.multiple);
@@ -206,6 +212,7 @@ for (const connected of [false, true]) test(
 		assert.equal(files.has('file name.pdf'), false);
 		assert.equal(files.has(`wujie-locked-${range.box.id}.wujie-lock`), false);
 		assert.ok(contents(session.editor.view).includes('[file name.pdf](<./file%20name.pdf>)'));
+		assert.ok(contents(session.editor.view).indexOf('<./new%20image.png>') < contents(session.editor.view).indexOf('private image note'));
 		for (let tries = 0; tries < 20 && !area.querySelector('.wujie-editor-image[alt="new image.png"]'); tries++)
 			await new Promise(resolve => setImmediate(resolve));
 		assert.ok(area.querySelector('.wujie-editor-image[alt="new image.png"]')?.closest('.cm-line'));
@@ -217,7 +224,7 @@ for (const connected of [false, true]) test(
 		assert.equal(files.has(photo.path), false);
 		manager.permanent({ area, path: file.path, marker: updated.marker, box: updated.box, saved: 0, version: 0 });
 		await submit();
-		assert.ok(disk.startsWith(body));
+		assert.ok(disk.startsWith(body.split('\n')[0] + '\n') && disk.endsWith('\nprivate image note'));
 		assert.deepEqual(new Uint8Array(await vault.readBinary(files.get(photo.path))), Uint8Array.of(1, 2, 3, 4));
 		assert.equal(files.get(photo.path).stat.mtime, photo.stat.mtime);
 		assert.equal(new TextDecoder().decode(await vault.readBinary(files.get('file name.pdf'))), 'private PDF bytes');
@@ -291,7 +298,7 @@ test('a picker returning after lock cannot import until the note is reopened', a
 		assert.equal(packages.size, 0);
 		assert.equal(packages.has('photo.png'), false);
 		const { text } = await openLocked(range.box, password);
-		assert.match(JSON.parse(text).text, /初始秘密[\s\S]*!\[\]\(<\.\/photo\.png>\)/u);
+		assert.match(JSON.parse(text).text, /!\[\]\(<\.\/photo\.png>\)[\s\S]*初始秘密/u);
 		assert.equal(reopened.box.id, range.box.id);
 		assert.equal(range.box.salt, session.box.salt);
 		await assert.rejects(openLocked(range.box, 'wrong password'));
@@ -339,7 +346,7 @@ test('adding to an existing sidecar bundle migrates it only after saving the new
 });
 
 test('connected vault drop travels as one note and unlocks with attachments on the second device', async t => {
-	const source = await fixture('note');
+	const source = await fixture('note', 'before drop\nafter drop');
 	let receiver;
 	const image = new File([Uint8Array.of(1, 3, 7)], 'photo.png', { lastModified: 1577836800456 });
 	const pdfContents = '%PDF-1.7\nprivate document bytes\n' + 'a'.repeat(2400000);
@@ -360,9 +367,14 @@ test('connected vault drop travels as one note and unlocks with attachments on t
 		source.container.querySelector('button').click(); await submit();
 		const [session] = source.manager.sessions;
 		assert.ok([...session.area.querySelectorAll('button')].some(control => control.textContent === '添加附件'));
+		const managerView = session.editor.view;
+		managerView.posAtCoords = coordinates => {
+			assert.deepEqual(coordinates, { x: 15, y: 25 });
+			return managerView.state.doc.line(1).to;
+		};
 		const transfer = { types: ['Files'], files: [image, pdf] };
 		const fire = type => {
-			const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true });
+			const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, clientX: 15, clientY: 25 });
 			Object.defineProperty(event, 'dataTransfer', { value: transfer });
 			session.editor.view.contentDOM.dispatchEvent(event);
 			return event;
@@ -424,7 +436,7 @@ test('connected vault drop travels as one note and unlocks with attachments on t
 		receiver.manager.app.vault.createBinary = () => assert.fail('Temporary unlock must not create a file');
 		receiver.container.querySelector('button').click(); await submit();
 		const [reopened] = receiver.manager.sessions;
-		assert.match(contents(reopened.editor.view), /report\.pdf/u);
+		assert.match(contents(reopened.editor.view), /^before drop\n!\[\]\(<\.\/photo\.png>\)\n\[report\.pdf\]\(<\.\/report\.pdf>\)\nafter drop$/u);
 		for (let tries = 0; tries < 20 && !receiver.container.querySelector('.wujie-editor-image'); tries++)
 			await new Promise(resolve => setImmediate(resolve));
 		assert.match(receiver.container.querySelector('.wujie-editor-image')?.src ?? '', /^blob:connected-/u);
@@ -498,6 +510,61 @@ test('secure live preview renders formatting in place, keeps Markdown on save an
 	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
 });
 
+test('secure preview shows legacy raster data and leaves file URLs inert until explicitly imported', async () => {
+	const data = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR42mNgAAIAAAUAAarVyFEAAAAASUVORK5CYII=';
+	const source = '![](' + data + ')\n\n![](<file:///C:/Temp/legacy.png>)';
+	const value = await fixture('note', source);
+	try {
+		value.container.querySelector('.wujie-encrypted button').click();
+		const prompt = modals.at(-1);
+		prompt.password.value = password;
+		prompt.password.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }));
+		assert.ok(!prompt.busy && !prompt.closed, 'IME confirmation must not submit');
+		prompt.password.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+		for (let tries = 0; tries < 100 && !prompt.closed; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+		assert.equal(prompt.closed, true);
+		const [session] = value.manager.sessions;
+		const view = session.editor.view;
+		assert.equal(view.dom.querySelector('.wujie-editor-image')?.getAttribute('src'), data, view.contentDOM.innerHTML);
+		assert.equal(view.dom.querySelectorAll('img[src^="file:"]').length, 0);
+		view.dispatch({ selection: { anchor: 0, head: 5 } });
+		assert.equal(view.dom.querySelector('.wujie-editor-image')?.getAttribute('src'), data);
+		const sourceControl = [...session.area.querySelectorAll('button')].find(control => control.textContent === '图片源码');
+		sourceControl.click();
+		assert.equal(view.dom.querySelector('.wujie-editor-image'), null);
+		assert.ok(view.dom.textContent.includes(data));
+		sourceControl.click();
+		assert.equal(view.dom.querySelector('.wujie-editor-image')?.getAttribute('src'), data);
+		assert.equal((await openLocked(lockedRanges(value.read())[0].box, password)).text, source);
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('encrypted file badge and list identify whole-note locks without adding a deletion action', async () => {
+	const value = await fixture('note');
+	const other = { path: 'plain.md' };
+	const explorer = value.container.createDiv();
+	const row = explorer.createDiv({ cls: 'nav-file-title', attr: { 'data-path': value.file.path } });
+	const plain = explorer.createDiv({ cls: 'nav-file-title', attr: { 'data-path': other.path } });
+	const { manager } = value;
+	const { vault } = manager.app;
+	vault.getMarkdownFiles = () => [other, value.file];
+	vault.cachedRead = file => file === value.file ? vault.read(file) : Promise.resolve('plain');
+	try {
+		manager.watchExplorer(explorer);
+		await new Promise(resolve => setTimeout(resolve, 100));
+		assert.ok(row.classList.contains('wujie-locked-file'));
+		assert.ok(!plain.classList.contains('wujie-locked-file'));
+		await manager.listLockedNotes();
+		assert.deepEqual([...modals.at(-1).contentEl.querySelectorAll('button')].map(button => button.textContent), [value.file.path]);
+		modals.at(-1).close();
+		const menu = new (await import('./encryption-dom-sdk.mjs')).Menu();
+		manager.addFileMenu(menu, value.file);
+		assert.deepEqual(menu.items, []);
+		manager.addFileMenu(menu, other);
+		assert.deepEqual(menu.items.map(item => item.title), ['加密整篇笔记']);
+	} finally { value.dispose(); await Promise.all(manager.pendingWrites); }
+});
+
 test('encrypted autosave refreshes a stale host editor and still refuses new surrounding edits', async () => {
 	const value = await fixture('text', '初始秘密', { refreshInProcess: false });
 	try {
@@ -558,14 +625,108 @@ test('live-preview code block redraw keeps the same secure editor through consec
 	} finally { value.dispose(); await Promise.all(manager.pendingWrites); }
 });
 
-test('partial ciphertext edits are rejected while deleting a whole encrypted block remains possible', async () => {
+test('inline ciphertext survives backspace, forward delete, cut, and selection replacement', async () => {
 	const value = await fixture();
 	try {
-		const original = value.view.state.doc.toString(), [range] = lockedRanges(original);
-		value.view.dispatch({ changes: { from: range.from + 20, to: range.from + 21, insert: 'X' } });
-		assert.equal(value.view.state.doc.toString(), original);
-		value.view.dispatch({ changes: { from: range.from, to: range.to, insert: '' } });
-		assert.equal(value.view.state.doc.toString(), '前文  后文');
+		const original = contents(value.view), [range] = lockedRanges(original);
+		for (const [position, command] of [[range.to, deleteCharBackward], [range.from, deleteCharForward]]) {
+			value.view.dispatch({ selection: { anchor: position } });
+			command(value.view);
+			assert.equal(contents(value.view), original);
+		}
+		for (const changes of [
+			{ from: range.from + 20, to: range.from + 21, insert: 'X' },
+			{ from: range.from, to: range.to },
+			{ from: 0, to: original.length, insert: 'replacement' },
+		]) {
+			value.view.dispatch({ changes, userEvent: 'delete.cut' });
+			assert.equal(contents(value.view), original);
+		}
+		value.view.dispatch({ changes: [{ from: range.from, insert: 'before ' }, { from: range.to, insert: ' after' }] });
+		assert.equal(contents(value.view), original.replace(range.marker, 'before ' + range.marker + ' after'));
+		assert.equal(undo(value.view), true);
+		assert.equal(contents(value.view), original);
+		assert.equal(redo(value.view), true);
+		assert.equal(lockedRanges(contents(value.view))[0].marker, range.marker);
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('explicit encrypted block deletion requires the correct password and writes only surrounding text', async () => {
+	const value = await fixture();
+	try {
+		const original = value.read();
+		value.container.querySelector('.wujie-crypto-more').click();
+		menus.at(-1).items.find(item => item.title === '删除加密段落').callback();
+		const prompt = modals.at(-1);
+		assert.equal(prompt.titleText, '删除加密段落');
+		prompt.password.value = 'wrong password';
+		await prompt.run();
+		assert.ok(!prompt.closed);
+		assert.equal(value.read(), original);
+		await submit();
+		assert.equal(value.read(), '前文  后文');
+		assert.equal(contents(value.view), value.read());
+		assert.equal(undo(value.view), false);
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('whole-note source is read-only and uses a stable block through lock, autosave, and external refresh', async () => {
+	const box = await createLocked('初始秘密', password, '', 'note');
+	const original = '\n' + lockedMarker(box) + '\n';
+	const value = await fixture('note', undefined, { received: original });
+	try {
+		const { view, manager } = value;
+		const lock = value.container.querySelector('.wujie-crypto-block-lock');
+		assert.ok(lock);
+		assert.equal(view.state.readOnly, true);
+		assert.equal(view.contentDOM.contentEditable ?? view.contentDOM.getAttribute('contenteditable'), 'false');
+		for (const anchor of [0, 1, original.length]) {
+			view.dispatch({ selection: { anchor } });
+			view.dispatch({ changes: { from: anchor, insert: '明文' }, userEvent: 'input.type.compose' });
+			deleteCharBackward(view);
+			assert.equal(contents(view), original);
+			assert.equal(value.container.querySelector('.wujie-crypto-block-lock'), lock);
+		}
+		value.applyViewText('未保存的窗格内容', 'set');
+		assert.equal(contents(view), original);
+		assert.equal(await value.read(), original);
+
+		lock.querySelector('button').click();
+		await submit();
+		const [session] = manager.sessions;
+		manager.editSession(session);
+		const editor = session.editor.view;
+		for (const text of ['', '清空后继续输入']) {
+			edit(editor, text);
+			await manager.queueSave(session);
+			assert.ok(editor.dom.isConnected);
+			assert.equal(contents(view), value.read());
+			assert.equal((await openLocked(lockedRanges(value.read())[0].box, password)).text, text);
+		}
+		await manager.lock(session);
+		assert.equal(undo(view), false);
+
+		const updated = await createLocked('同步的新内容', password, '', 'note');
+		await manager.app.vault.process(value.file, () => lockedMarker(updated));
+		assert.equal(contents(view), lockedMarker(updated));
+		await manager.app.vault.process(value.file, () => '从历史恢复的普通笔记');
+		assert.equal(contents(view), '从历史恢复的普通笔记');
+		assert.equal(view.state.readOnly, false);
+		assert.equal(undo(view), false);
+	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
+});
+
+test('paste and synced replacement do not add undo entries that could remove or restore a lock', async () => {
+	const value = await fixture();
+	try {
+		const original = contents(value.view), marker = lockedRanges(original)[0].marker;
+		value.view.dispatch({ changes: { from: 0, insert: marker + ' ' }, userEvent: 'input.paste' });
+		assert.equal(undo(value.view), false);
+		assert.equal(lockedRanges(contents(value.view)).length, 2);
+		const replacement = lockedMarker(await createLocked('同步的密文', password));
+		await value.manager.app.vault.process(value.file, current => current.replace(marker, replacement));
+		assert.equal(contents(value.view), value.read());
+		assert.equal(undo(value.view), false);
 	} finally { value.dispose(); await Promise.all(value.manager.pendingWrites); }
 });
 
@@ -627,7 +788,7 @@ test('inline locks and unlocked plaintext keep actions outside the document; des
 	try {
 		const area = value.container.querySelector('.wujie-encrypted');
 		area.querySelector('.wujie-crypto-more').click();
-		assert.deepEqual(menus.at(-1).items.map(item => item.title), ['解锁', '修改密码', '永久解密']);
+		assert.deepEqual(menus.at(-1).items.map(item => item.title), ['解锁', '修改密码', '永久解密', '删除加密段落']);
 		assert.equal(area.querySelector('.wujie-crypto-menu'), null);
 		value.manager.closeActions();
 		area.querySelector('button').click(); await submit();
@@ -635,7 +796,7 @@ test('inline locks and unlocked plaintext keep actions outside the document; des
 		assert.equal(area.querySelector('pre'), null);
 		assert.equal(area.querySelectorAll('button').length, 1, 'only a discreet more trigger stays in the sentence');
 		area.querySelector('.wujie-decrypted-text').click();
-		assert.deepEqual(menus.at(-1).items.map(item => item.title), ['编辑', '锁定', '修改密码', '永久解密']);
+		assert.deepEqual(menus.at(-1).items.map(item => item.title), ['编辑', '锁定', '修改密码', '永久解密', '删除加密段落']);
 		assert.ok(!area.textContent.includes('永久解密'));
 		await value.manager.lock([...value.manager.sessions][0]);
 		assert.equal(menus.at(-1).visible, false);
@@ -650,7 +811,7 @@ test('touch actions use a modal bottom sheet and opening a password form removes
 		const sheet = modals.at(-1);
 		assert.ok(sheet.modalEl.classList.contains('wujie-crypto-sheet'));
 		assert.equal(area.querySelector('.wujie-crypto-sheet'), null);
-		assert.deepEqual([...sheet.contentEl.querySelectorAll('button')].map(el => el.textContent), ['解锁', '修改密码', '永久解密', '取消']);
+		assert.deepEqual([...sheet.contentEl.querySelectorAll('button')].map(el => el.textContent), ['解锁', '修改密码', '永久解密', '删除加密段落', '取消']);
 		sheet.contentEl.querySelector('button').click();
 		assert.equal(sheet.modalEl.isConnected, false);
 		assert.equal(modals.at(-1).titleText, '解锁'); modals.at(-1).close();

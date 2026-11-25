@@ -37,7 +37,8 @@ const word = selected === 'word';
 const bundledWord = selected !== 'cn';
 const region = word ? 'cn' : selected;
 const config = region ? await loadEdition(region) : null;
-const runtimeEdition = word ? { edition: 'cn', id: 'wujie-word', locale: 'zh-CN' } : config;
+const runtimeEdition = word ? { edition: 'cn', locale: 'zh-CN' } : config;
+const wordManifest = word ? JSON.parse(await readFile('manifest.word.json', 'utf8')) : undefined;
 const output = selected ? `artifacts/${selected}` : 'artifacts';
 await mkdir(output, { recursive: true });
 const result = await build({
@@ -53,7 +54,7 @@ const result = await build({
 	define: {
         __SMART_SYNC_GLOBAL_UI__: JSON.stringify(config?.edition === 'global'),
         __SMART_SYNC_CN_TRANSLATION__: JSON.stringify(config?.edition !== 'global'),
-		...(runtimeEdition ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...runtimeEdition, development: false }) } : {}),
+		...(runtimeEdition ? { __SMART_SYNC_EDITION__: JSON.stringify({ ...runtimeEdition, ...(wordManifest ? { id: wordManifest.id } : {}), development: false }) } : {}),
 		__SMART_SYNC_TRAY_LOGO__: JSON.stringify(`data:image/png;base64,${trayLogo}`),
 		__SMART_SYNC_BUNDLED_WORD__: JSON.stringify(bundledWord),
 	},
@@ -72,7 +73,7 @@ if (Buffer.byteLength(main) > 5_000_000) throw Error('The plugin bundle exceeds 
 await writeFile(mainPath, main);
 await writeFile(`${output}/dependency-map.json`, JSON.stringify(result.metafile, null, 2));
 if (config) {
- const manifest = JSON.parse(await readFile(word ? 'manifest.word.json' : 'manifest.json', 'utf8'));
+ const manifest = wordManifest ?? JSON.parse(await readFile('manifest.json', 'utf8'));
  if (!word) Object.assign(manifest, { id: config.id, name: config.name });
  await writeFile(`${output}/manifest.json`, JSON.stringify(manifest, null, 2) + '\n');
  if (!word) await writeFile(`${output}/edition.json`, JSON.stringify(config, null, 2) + '\n');

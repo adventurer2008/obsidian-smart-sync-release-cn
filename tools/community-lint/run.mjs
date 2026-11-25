@@ -21,8 +21,12 @@ if (
 	throw new Error('Plugin ID does not satisfy the Community manifest rules');
 const files = (await readdir('src', { recursive: true }))
 	.filter((file) => file.endsWith('.js')).map((file) => file.replaceAll('\\', '/')).sort();
-const map = JSON.parse(await readFile(resolve(artifactRoot, 'dependency-map.json'), 'utf8'));
-const bundled = Object.keys(map.inputs)
+// All shared source is checked even though the regional and Word bundles differ.
+const mapRoots = edition ? ['cn', 'global', 'word'].map(name => resolve('artifacts', name)) : [artifactRoot];
+const maps = await Promise.all(mapRoots.map(async dir =>
+	JSON.parse(await readFile(resolve(dir, 'dependency-map.json'), 'utf8')),
+));
+const bundled = [...new Set(maps.flatMap(map => Object.keys(map.inputs)))]
 	.filter((file) => file.startsWith('src/'))
 	.sort();
 if (

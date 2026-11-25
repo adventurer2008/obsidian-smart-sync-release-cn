@@ -101,6 +101,7 @@ export function configurationScope({
 		'smart-sync',
 		'wujie-sync',
 		'wujie-word',
+		'smart-word',
 		'smart-sync-global',
 		'smart-sync-v2-test',
 		'ss2-native-driver',

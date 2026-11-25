@@ -113,7 +113,14 @@ export async function stageNoteAttachments(vault, id, key, text, files, verifyPa
 
 const foldPath = path => path.normalize('NFC').toLowerCase();
 
-export async function stageImportedAttachments(vault, id, key, text, notePath, files, prior, verifyPath, active) {
+export function attachmentInsertion(text, position, links) {
+	const before = text.slice(0, position), after = text.slice(position);
+	const prefix = before && !before.endsWith('\n') ? '\n' : '';
+	const suffix = after.startsWith('\n') ? '' : '\n';
+	return prefix + links.join('\n') + suffix;
+}
+
+export async function stageImportedAttachments(vault, id, key, text, notePath, files, prior, verifyPath, active, position = text.length) {
 	const oldEntries = prior?.manifest.entries ?? [];
 	const total = oldEntries.reduce((size, entry) => size + entry.size, 0) + files.reduce((size, file) => size + file.size, 0);
 	const count = oldEntries.length + files.length;
@@ -163,7 +170,8 @@ export async function stageImportedAttachments(vault, id, key, text, notePath, f
 		} finally { clear.fill(0); }
 	}
 	assertActive();
-	return writeAttachmentPackage(vault, id, key, `${text}${text ? '\n\n' : ''}${links.join('\n')}\n`, entries, bytes, true);
+	const content = text.slice(0, position) + attachmentInsertion(text, position, links) + text.slice(position);
+	return { ...await writeAttachmentPackage(vault, id, key, content, entries, bytes, true), links };
 }
 
 async function writeAttachmentPackage(vault, id, key, text, entries, bytes, embedded) {

@@ -40,6 +40,14 @@ const codeStyle = Decoration.line({ class: 'wujie-editor-code' });
 const markerStyle = Decoration.mark({ class: 'wujie-editor-marker' });
 const hidden = Decoration.replace({});
 const setAttachments = StateEffect.define();
+const showImageSource = StateEffect.define();
+const imageSource = StateField.define({
+	create: () => false,
+	update(value, transaction) {
+		for (const effect of transaction.effects) if (effect.is(showImageSource)) value = effect.value;
+		return value;
+	},
+});
 const attachments = StateField.define({
 	create: () => new Map(),
 	update(value, transaction) {
@@ -95,7 +103,10 @@ function previewImage(doc, node, lookup) {
 	let target;
 	try { target = node.name === 'WikiImage' ? ref.target.trim() : decodeURIComponent(ref.target); }
 	catch { return; }
-	const image = lookup.get(target);
+	// A legacy inline raster is already part of the encrypted Markdown.
+	// File URLs, remote images and SVG are never loaded by the secure editor.
+	const inline = /^data:image\/(?:png|jpeg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/iu.test(target);
+	const image = inline ? { path: 'Image', url: target } : lookup.get(target);
 	return image?.url && Decoration.replace({ widget: new InlineImage(image, ref.width) }).range(node.from, node.to);
 }
 const bullet = Decoration.replace({ widget: new class extends WidgetType {
@@ -110,7 +121,7 @@ function previewDecorations(view) {
 	const { doc, selection } = view.state;
 	const images = view.state.field(attachments);
 	const { from, to } = view.viewport;
-	const decorations = [], lineStyles = new Set();
+	const decorations = [], imagesOnly = [], lineStyles = new Set();
 	const isActive = node => selection.ranges.some(range => range.from <= node.to && range.to >= node.from);
 	const line = (offset, decoration) => {
 		const start = doc.lineAt(offset).from;
@@ -123,10 +134,9 @@ function previewDecorations(view) {
 	view.state.field(parsed).iterate({ from, to, enter(ref) {
 		const { name, node } = ref;
 		if (name === 'Image' || name === 'WikiImage') {
-			const selectionOnImage = view.hasFocus && isActive(node);
-			if (!selectionOnImage && doc.lineAt(node.from).to >= node.to) {
+			if (!view.state.field(imageSource) && doc.lineAt(node.from).to >= node.to) {
 				const decoration = previewImage(doc, node, images);
-				if (decoration) decorations.push(decoration);
+				if (decoration) { decorations.push(decoration); imagesOnly.push(decoration); }
 			}
 			return false;
 		}
@@ -156,17 +166,21 @@ function previewDecorations(view) {
 		const scope = quoteMarker || headingMarker ? doc.lineAt(node.from) : parent;
 		decorations.push((isActive(scope) ? markerStyle : hidden).range(node.from, end));
 	} });
-	return Decoration.set(decorations, true);
+	return { decorations: Decoration.set(decorations, true), images: Decoration.set(imagesOnly, true) };
 }
 
 const livePreview = ViewPlugin.fromClass(class {
-	constructor(view) { this.decorations = previewDecorations(view); }
+	constructor(view) { this.preview = previewDecorations(view); }
 	update(update) {
 		if (update.docChanged || update.selectionSet || update.viewportChanged || update.focusChanged ||
-			update.startState.field(attachments) !== update.state.field(attachments))
-			this.decorations = previewDecorations(update.view);
+			update.startState.field(attachments) !== update.state.field(attachments) ||
+			update.startState.field(imageSource) !== update.state.field(imageSource))
+			this.preview = previewDecorations(update.view);
 	}
-}, { decorations: plugin => plugin.decorations });
+}, {
+	decorations: plugin => plugin.preview.decorations,
+	provide: plugin => EditorView.atomicRanges.of(view => view.plugin(plugin)?.preview.images ?? Decoration.none),
+});
 
 function toggleInline(view, marker) {
 	view.dispatch(view.state.changeByRange(range => {
@@ -202,7 +216,7 @@ export function createSecureEditor(parent, text, { label, path, onChange, onLimi
 		parent,
 		root: parent.getRootNode(),
 		state: EditorState.create({ doc: text, extensions: [
-			parsed, attachments, livePreview, EditorView.lineWrapping, history(),
+			parsed, attachments, imageSource, livePreview, EditorView.lineWrapping, history(),
 			keymap.of([
 				{ key: 'Mod-b', run: editor => toggleInline(editor, '**') },
 				{ key: 'Mod-i', run: editor => toggleInline(editor, '*') },
@@ -217,7 +231,7 @@ export function createSecureEditor(parent, text, { label, path, onChange, onLimi
 				return [];
 			}),
 			EditorView.updateListener.of(update => {
-				if (update.docChanged && !replacing) onChange(update.state.doc.toString());
+				if (update.docChanged && !replacing) onChange(update.state.doc.toString(), update.changes);
 			}),
 		] }),
 	});
@@ -225,13 +239,14 @@ export function createSecureEditor(parent, text, { label, path, onChange, onLimi
 		view,
 		setImages(images) { view.dispatch({ effects: setAttachments.of(attachmentLookup(images, path)) }); },
 		format(marker, lines) { if (lines) toggleLines(view, marker); else toggleInline(view, marker); },
-		replace(text) {
-			const before = view.state.doc.toString();
-			if (text === before) return;
-			const from = text.startsWith(before) ? before.length : 0;
+		toggleImageSource() {
+			const show = !view.state.field(imageSource);
+			view.dispatch({ effects: showImageSource.of(show) });
+			return show;
+		},
+		insertAttachmentText(from, insert) {
 			replacing = true;
-			try { view.dispatch({ changes: { from, to: before.length, insert: text.slice(from) },
-				annotations: Transaction.addToHistory.of(false) }); }
+			try { view.dispatch({ changes: { from, insert }, annotations: Transaction.addToHistory.of(false) }); }
 			finally { replacing = false; }
 		},
 		destroy() {
