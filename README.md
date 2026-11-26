@@ -4,7 +4,7 @@ Wujie Sync is an Obsidian plugin for users in China. It synchronizes notes and a
 
 面向中国用户的 Obsidian 同步插件。插件 ID：`wujie-sync`。本仓库提供国内版源码快照、安装包、使用说明及更新记录。
 
-当前版本：**1.1.13**（2026-11-26，正式版）。同步 Word 文件。文档编辑可安装[Smart Word](https://user.wujiesync.cc/download/smart-word/stable/1.0.1/smart-word-1.0.1.zip)。
+当前版本：**1.1.14**（2026-11-26，正式版）。同步 Word 文件。文档编辑可安装[Smart Word](https://user.wujiesync.cc/download/smart-word/stable/1.0.1/smart-word-1.0.1.zip)。
 
 **专业云存储，笔记加密存放。**
 
@@ -159,7 +159,7 @@ Wujie Sync is an Obsidian plugin for users in China. It synchronizes notes and a
 
 已通过 BRAT 安装的用户，可继续使用仓库 `adventurer2008/obsidian-smart-sync-release-cn` 更新。手动安装及文件校验见[操作手册](USER-GUIDE.md#手动安装)。
 
-## 当前版本：1.1.13（2026-11-26）
+## 当前版本：1.1.14（2026-11-26）
 
 购买、续费和订单查看统一使用独立支付入口；用户网页与下载使用当前入口，旧链接停止服务且不跳转。同步、加密、文件原始修改时间及现有设备配置保持。详见[更新说明](RELEASE-NOTES.md)。
 

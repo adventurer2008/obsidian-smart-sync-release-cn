@@ -72,12 +72,13 @@ test('integrated identity retains the full account value without a separate reve
 	dispose();
 });
 
-test('overview retains verified details through a vault reopen and rejects another credential or revoked session', async t => {
+test('overview retries startup credentials and saves the email before cloud usage finishes', async t => {
 	const saved = new Map();
 	const first = fixture(t);
 	const email = 'fixture@example.invalid';
 	const label = 'Fixture notebook';
-	let credential = 'fixture-access-one', offline = false, revoked = false, requestedSignal;
+	let credential = '', offline = false, revoked = false, requestedSignal;
+	const usage = Promise.withResolvers();
 	const configure = ({ plugin }) => {
 		plugin.manifest.id = 'wujie-sync';
 		plugin.data.settings.workspace = '11111111-1111-1111-1111-111111111111';
@@ -93,7 +94,7 @@ test('overview retains verified details through a vault reopen and rejects anoth
 				return value;
 			};
 			const api = {
-				request: (_method, path) => result(path === 'account' ? { email } : { logicalBytes: 25 * 1024 ** 2 }),
+				request: (_method, path) => result(path === 'account' ? { email } : usage.promise),
 				info: () => result({ label }), scope: path => path,
 			};
 			return api;
@@ -107,6 +108,13 @@ test('overview retains verified details through a vault reopen and rejects anoth
 		.some(row => row.setting.desc?.includes(value) || row.textContent.includes(value));
 	configure(first);
 	first.tab.display();
+	assert.equal(requestedSignal, undefined);
+	credential = 'fixture-access-one';
+	for (const refresh of first.timers.values()) refresh();
+	await waitFor(() => shown(first, email));
+	assert.equal(shown(first, '25 MB'), false);
+	assert.equal(JSON.parse(saved.get('wujie-sync-synthetic-overview-display')).email, email);
+	usage.resolve({ logicalBytes: 25 * 1024 ** 2 });
 	await waitFor(() => shown(first, email) && shown(first, label) && shown(first, '25 MB'));
 	assert.notEqual(requestedSignal, first.plugin.abortController.signal);
 	assert.equal(requestedSignal.aborted, false);
