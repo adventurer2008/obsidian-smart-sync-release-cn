@@ -1017,3 +1017,39 @@
 	margin-inline: 16px;
 	align-self: start;
 }
+
+.smart-sync-settings-page .smart-sync-common > .setting-item.smart-sync-cn-access {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	padding: 16px;
+	margin-block: 10px 16px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary-alt);
+}
+.smart-sync-cn-access .setting-item-info {
+	flex: 1 1 100%;
+	min-width: 0;
+	margin: 0;
+}
+.smart-sync-cn-access .setting-item-control {
+	flex: 1 1 100%;
+	flex-wrap: wrap;
+	justify-content: flex-start;
+	gap: 8px;
+}
+.smart-sync-settings-page .smart-sync-cn-access .setting-item-control button {
+	min-height: 44px;
+	max-width: 100%;
+	white-space: normal;
+}
+.smart-sync-settings-page .smart-sync-cn-access .setting-item-control button.mod-cta {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}
+@media (max-width: 480px) {
+	.smart-sync-cn-access .setting-item-control button { flex: 1 1 100%; }
+}
+.smart-sync-settings-page .setting-item.smart-sync-empty-cn-billing { display: none; }

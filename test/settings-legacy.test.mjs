@@ -36,6 +36,23 @@ function fixture(t) {
 	return { tab, plugin, timers };
 }
 
+test('China signed-out settings lead with separate free, key and paid routes', async t => {
+	const { tab, plugin } = fixture(t), calls = [];
+	plugin.openBilling = async (...args) => calls.push(args);
+	plugin.enrollment = async () => calls.push('login');
+	const definitions = tab.getSettingDefinitions();
+	const welcome = definitions.find(item => item.name === '开始使用无界同步');
+	assert.ok(definitions.indexOf(welcome) < definitions.findIndex(item => item.cls === 'smart-sync-overview-group'));
+	const setting = new Setting(tab.containerEl);
+	welcome.render(setting);
+	assert.match(setting.desc, /从邮件复制登录密钥.*回到 Obsidian/);
+	assert.deepEqual(setting.controls.map(control => control.text), ['免费开通', '已有密钥，登录', '查看付费套餐']);
+	for (const control of setting.controls) await control.click();
+	assert.deepEqual(calls, [[undefined, false, 'free'], 'login', [undefined, false, 'paid']]);
+	plugin.accountAuthorized = true;
+	assert.equal(tab.getSettingDefinitions().some(item => item.name === welcome.name), false);
+});
+
 test('integrated identity retains the full account value without a separate reveal action', t => {
 	const { tab, plugin } = fixture(t);
 	plugin.secret = key => key === 'account' ? 'synthetic-account-key' : '';

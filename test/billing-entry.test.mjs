@@ -67,6 +67,13 @@ test('guest entry opens plans directly and keeps its scoped handoff while the br
     assert.equal(plugin.purchaseSession().capability,capability);
     await Plugin.prototype.openBilling.call(plugin);
     assert.equal(opened[1],opened[0]); assert.equal(requests,2);
+    for (const intent of ['free', 'paid']) {
+        await Plugin.prototype.openBilling.call(plugin, undefined, false, intent);
+        const url = new URL(opened.at(-1)), fragment = new URLSearchParams(url.hash.slice(1));
+        assert.equal(url.search, '');
+        assert.equal(fragment.get('intent'), intent);
+        assert.equal(fragment.get('register'), capability);
+    }
 });
 
 test('purchase entry uses account auth, pins HTTPS origin and never opens a late response for another account', async () => {

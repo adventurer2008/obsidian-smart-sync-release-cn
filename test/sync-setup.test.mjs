@@ -13,18 +13,18 @@ function fixture() {
     const secrets = {};
     const plugin = { app: {}, data: { localId: 'guest', settings: { origin: 'https://sync.example.invalid', workspace: '', direction: 'both' } },
         secret: name => secrets[name] ?? '',
-        openBilling: async () => calls.push('purchase'), enrollment: async () => calls.push('login'),
+        openBilling: async (_order, _prepare, intent) => calls.push(intent), enrollment: async () => calls.push('login'),
         synchronize: async () => calls.push('sync'), warnCapacity: async () => calls.push('capacity') };
     plugin.synchronizeManually = () => Plugin.prototype.synchronizeManually.call(plugin);
     return { plugin, calls, secrets, clickSync: () => Plugin.prototype.requestSynchronization.call(plugin) };
 }
 
-test('first-use Sync now immediately offers purchase and login, without network or synchronization', async () => {
-    for (const [index, expected] of [[0, 'purchase'], [1, 'login']]) {
+test('first-use Sync now offers free enrollment, key login and paid plans, without network or synchronization', async () => {
+    for (const [index, expected] of [[0, 'free'], [1, 'login'], [2, 'paid']]) {
         const f = fixture(), dialog = await f.clickSync();
-        assert.equal(dialog.title, '请先开通套餐');
-        assert.match(dialog.contentEl.children[0].text, /购买.*开通.*登录/);
-        assert.deepEqual(dialog.contentEl.settings.map(row => row.controls[0].text), ['购买', '已有账号登录']);
+        assert.equal(dialog.title, '开始使用无界同步');
+        assert.match(dialog.contentEl.children[0].text, /免费开通.*复制登录密钥.*回到 Obsidian/);
+        assert.deepEqual(dialog.contentEl.settings.map(row => row.controls[0].text), ['免费开通', '已有密钥，登录', '查看付费套餐']);
         assert.deepEqual(f.calls, []);
         assert.equal(await f.clickSync(), dialog);
         const click = dialog.contentEl.settings[index].controls[0].click;

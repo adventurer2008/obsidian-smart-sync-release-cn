@@ -151,6 +151,20 @@ function bindAction(setting, label, callback) {
 		});
 	});
 }
+const chinaAccess = Object.freeze({
+	title: '开始使用无界同步',
+	help: '首次使用可以免费开通。开通后，从邮件复制登录密钥，再回到 Obsidian 登录。',
+	free: '免费开通',
+	login: '已有密钥，登录',
+	paid: '查看付费套餐',
+});
+function chinaAccessActions(plugin) {
+	return [
+		[chinaAccess.free, () => plugin.openBilling(undefined, false, 'free')],
+		[chinaAccess.login, () => plugin.enrollment()],
+		[chinaAccess.paid, () => plugin.openBilling(undefined, false, 'paid')],
+	];
+}
 export function bindManualSyncAction(setting, plugin) {
  const status = setting.settingEl.createDiv({ cls: 'smart-sync-manual-feedback', attr: { role: 'status', 'aria-live': 'polite' } });
  setting.settingEl.classList.add('smart-sync-manual-action');
@@ -2829,15 +2843,19 @@ export default class IndependentSync extends Plugin {
 			const binding = () => JSON.stringify([this.data.localId, this.data.settings.origin, this.data.settings.workspace, this.secret('account'), this.secret('access')]);
 			const expected = binding();
 			const live = () => !this.stopped && !this.stopping && !this.connecting && !this.running && binding() === expected;
-			const dialog = new ChoiceWindow(this.app, t('billing.setupTitle'), area => {
-				area.createEl('p', { text: t('billing.setupHelp') });
+			const cn = edition.edition === 'cn';
+			const dialog = new ChoiceWindow(this.app, (cn ? chinaAccess.title : t('billing.setupTitle')), area => {
+				area.createEl('p', { text: (cn ? chinaAccess.help : t('billing.setupHelp')) });
 				const proceed = async callback => {
 					if (this.syncSetupWindow !== dialog || !live()) { dialog.close(); return; }
 					dialog.close();
 					await callback();
 				};
-				action(area, t('billing.buy'), () => proceed(() => this.openBilling()));
-				action(area, t('billing.existing'), () => proceed(() => this.enrollment()));
+				const choices = cn ? chinaAccessActions(this) : [
+					[t('billing.buy'), () => this.openBilling()],
+					[t('billing.existing'), () => this.enrollment()],
+				];
+				for (const [label, callback] of choices) action(area, label, () => proceed(callback));
 			});
 			dialog.onClose = () => {
 				dialog.contentEl.empty();
@@ -4150,7 +4168,7 @@ export default class IndependentSync extends Plugin {
 			throw error;
 		}
 	}
-	async openBilling(orderId,prepareOnly=false) {
+	async openBilling(orderId,prepareOnly=false,intent) {
 		if (!['cn','global'].includes(edition.edition)) return;
 		const localId = this.data.localId, origin = new URL(this.data.settings.origin).origin;
 		const guest = !this.secret('account') && !this.secret('access');
@@ -4161,6 +4179,15 @@ export default class IndependentSync extends Plugin {
 		const canPrepare=Platform.isMobile&&edition.edition==='global'&&!guest&&orderId===undefined;
 		if(prepareOnly&&!canPrepare)return;
 		const openEntry = (href,expires=Date.now()+90000) => {
+			if (guest && edition.edition === 'cn' && (intent === 'free' || intent === 'paid')) {
+				const target = new URL(href);
+				if (target.pathname === new URL(purchaseBase + '/plans').pathname) {
+					const fragment = new URLSearchParams(target.hash.slice(1));
+					fragment.set('intent', intent);
+					target.hash = fragment.toString();
+					href = target.href;
+				}
+			}
             if (edition.edition === 'global') { const localized = new URL(href); const fragment = new URLSearchParams(localized.hash.slice(1)); fragment.set('lang',locale); localized.hash = fragment.toString(); href = localized.href; }
 			if (!Platform.isMobile) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
 			this.billingHandoffCancel?.();this.billingFallbackWindow?.close();
@@ -5449,6 +5476,13 @@ export class IndependentSettings extends PluginSettingTab {
 			return sameScope() && value?.scope === scopeKey && value.credential === plugin.secret(credentialName) &&
 				value.accountCredential === plugin.secret('account') ? value : undefined;
 		};
+		const cnWelcome = edition.edition === 'cn' && !accountConnected;
+		const welcome = cnWelcome ? row(chinaAccess.title, setting => {
+			setting.settingEl.classList.add('smart-sync-cn-access');
+			setting.setDesc(chinaAccess.help);
+			for (const [label, callback] of chinaAccessActions(plugin)) bindAction(setting, label, callback);
+			setting.controlEl?.querySelector('button')?.classList.add('mod-cta');
+		}, t('overview.accountSearch')) : undefined;
 		const status = row(t('sections.status'), (setting) => {
 			const credential = plugin.secret(credentialName);
 			const accountCredential = plugin.secret('account');
@@ -5582,7 +5616,7 @@ export class IndependentSettings extends PluginSettingTab {
 			accountConnected
 				? [['msg_cd2d74373d', 'signOut']]
 				: [
-						['overview.login', 'enrollment'],
+						...(cnWelcome ? [] : [['overview.login', 'enrollment']]),
 						...(edition.edition === 'cn' ? [] : [['overview.apply', 'requestAccess']]),
 					],
 		);
@@ -5622,6 +5656,10 @@ export class IndependentSettings extends PluginSettingTab {
 			};
 		});
 		const billing = ['cn','global'].includes(edition.edition) ? row(t('billing.myPlan'), setting => {
+			if (cnWelcome && !plugin.purchaseSession?.()) {
+				setting.settingEl.classList.add('smart-sync-empty-cn-billing');
+				return () => { setting.settingEl.classList.remove('smart-sync-empty-cn-billing'); };
+			}
 			const credential = plugin.secret('account') || plugin.secret('access');
 			return mountBillingCard(setting, {
 				connected: accountConnected, load: async () => {
@@ -5692,6 +5730,7 @@ export class IndependentSettings extends PluginSettingTab {
 		});
 		return [
 			...header.map(present),
+			...(welcome ? [present(welcome)] : []),
             ...(edition.edition === 'global' ? [row(t('language.title'), setting => {
                 setting.settingEl?.classList.add('smart-sync-language-row');
                 return setting.addDropdown(input => input.addOptions({auto:t('language.auto'),...supportedLanguages}).setValue(plugin.data.interfaceLanguage ?? 'auto').onChange(async value => {
