@@ -230,6 +230,55 @@ function secretStorageId(plugin, name) {
 	const suffix = plugin.manifest.id === 'smart-sync-global' && name === 'encryption' ? 'enc' : name;
 	return `${plugin.manifest.id}-${plugin.data.localId}-${suffix}`;
 }
+function overviewScope(plugin) {
+	const { origin, workspace } = plugin.data.settings;
+	return `${origin}|${workspace}|${plugin.data.localId}`;
+}
+function overviewSession(plugin) {
+	const accountCredential = plugin.secret('account');
+	const credential = plugin.data.settings.workspace ? plugin.secret('access') : accountCredential;
+	return { scope: overviewScope(plugin), credential, accountCredential };
+}
+function matchesOverview(plugin, session) {
+	if (!session || plugin.stopped || overviewScope(plugin) !== session.scope) return false;
+	const current = overviewSession(plugin);
+	return current.credential === session.credential && current.accountCredential === session.accountCredential;
+}
+function overviewFields(value) {
+	return {
+		email: typeof value?.email === 'string' ? value.email : '',
+		label: typeof value?.label === 'string' ? value.label : '',
+		logicalBytes: Number.isSafeInteger(value?.logicalBytes) && value.logicalBytes >= 0 ? value.logicalBytes : undefined,
+	};
+}
+function overviewBinding({ scope, credential, accountCredential }) {
+	return fingerprint(new TextEncoder().encode(JSON.stringify([scope, credential, accountCredential])));
+}
+function loadOverview(plugin, binding) {
+	for (const key of ['overview', 'overview-display']) {
+		try {
+			const stored = plugin.secret(key);
+			if (!stored) continue;
+			const value = JSON.parse(stored);
+			return value?.binding === binding ? overviewFields(value) : undefined;
+		} catch { /* Try the previous cache format when the current entry cannot be read. */ }
+	}
+}
+function saveOverview(plugin, binding, fields) {
+	if (!binding) return;
+	try {
+		const value = JSON.stringify({ binding, ...fields });
+		if (plugin.secret('overview') !== value)
+			plugin.app.secretStorage?.setSecret(secretStorageId(plugin, 'overview'), value);
+	} catch { /* Keep verified details available in memory if storage is unavailable. */ }
+}
+function clearOverview(plugin) {
+	plugin.overviewIdentity = undefined;
+	for (const key of ['overview', 'overview-display']) {
+		try { plugin.app.secretStorage?.setSecret(secretStorageId(plugin, key), ''); }
+		catch { /* Connection binding still prevents reuse after credentials change. */ }
+	}
+}
 function operationBusy(code = 'SYNC_BUSY') {
 	return Object.assign(new Error('Operation must wait for active work'), { code });
 }
@@ -782,6 +831,7 @@ export default class IndependentSync extends Plugin {
 		this.data.reviewed ??= {};
 		this.reviewApprovals = this.data.reviewed;
 		this.accountAuthorized = this.secret('account').length >= 32;
+	await this.restoreOverview();
 		this.fileChanges = new Map();
 		this.contentPriorities = new Map();
 		this.startupInventory = new Set();
@@ -2065,6 +2115,30 @@ export default class IndependentSync extends Plugin {
 		api.signal = this.abortController.signal;
 		return api;
 	}
+	async restoreOverview() {
+		try {
+			const session = overviewSession(this);
+			if (!session.credential) return;
+			const binding = await overviewBinding(session);
+			if (!matchesOverview(this, session) || matchesOverview(this, this.overviewIdentity)) return;
+			const fields = loadOverview(this, binding);
+			if (fields) this.overviewIdentity = { ...fields, ...session };
+		} catch { /* An unavailable display cache must not block plugin startup. */ }
+	}
+	async rememberConnectedOverview(api, email, label) {
+		try {
+			const session = overviewSession(this);
+			if (!session.credential || api.accessKey !== session.credential) return;
+			const binding = await overviewBinding(session);
+			if (!matchesOverview(this, session) || api.signal?.aborted) return;
+			const earlier = matchesOverview(this, this.overviewIdentity)
+				? this.overviewIdentity : loadOverview(this, binding);
+			const fields = overviewFields({ ...earlier, email, label });
+			this.overviewIdentity = { ...fields, ...session };
+			saveOverview(this, binding, fields);
+			for (const update of this.statusListeners ?? []) update(this.overviewStatusText ?? this.status?.textContent ?? this.status?.text ?? t('sync.ready'));
+		} catch { /* Optional display details must not interrupt synchronization. */ }
+	}
 	async prepareDevice(api) {
 		if (this.devicePreparing) {
 			await this.devicePreparing;
@@ -2074,7 +2148,8 @@ export default class IndependentSync extends Plugin {
 			api.accessKey = this.secret('access');
 			let account = await api.request('GET', 'account');
 			this.ensureCurrent(api);
-			this.accountEmail = typeof account.email === 'string' ? account.email : '';
+			const email = typeof account.email === 'string' ? account.email : '';
+			this.accountEmail = email;
 			if (!account.scope) {
 				this.app.secretStorage.setSecret(`${this.manifest.id}-${this.data.localId}-account`,api.accessKey);
 				this.accountAuthorized = true;
@@ -2114,10 +2189,11 @@ export default class IndependentSync extends Plugin {
 				peers.drop();
 			}
 			bindLanTransfers(api, peers);
+			return email;
 		})().finally(() => {
 			this.devicePreparing = undefined;
 		});
-		await this.devicePreparing;
+		return this.devicePreparing;
 	}
 	async connection({ allowIdleScan = false, mark = () => {} } = {}) {
 		const notePath = value => safeHostPath(value, Platform.isWin === true);
@@ -2171,7 +2247,9 @@ export default class IndependentSync extends Plugin {
 			});
 		state.generation = info.generation;
 		this.syncStage('device');
-		await this.prepareDevice(api);
+		const email = await this.prepareDevice(api);
+		this.ensureCurrent(api);
+		await this.rememberConnectedOverview(api, email, info.label);
 		this.ensureCurrent(api);
 		mark('deviceReadyMs');
 		if (info.logicalStorage === 1 && this.lanPeers?.mode !== 'paused') {
@@ -3205,7 +3283,6 @@ export default class IndependentSync extends Plugin {
 		this.billingHandoffCancel?.();this.billingFallbackWindow?.close();this.preparedBillingEntry=undefined;
 		this.accountEmail = '';
 		this.overviewIdentity = undefined;
-		try { this.app.secretStorage?.setSecret(secretStorageId(this, 'overview-display'), ''); } catch { /* The credential binding still protects the cached values. */ }
 		this.lanPeers?.close();
 		this.lanPeers = undefined;
 		this.data.settings.direction = 'paused';
@@ -3242,6 +3319,7 @@ export default class IndependentSync extends Plugin {
 			try {const accountApi = this.workspaceApi(this.data.settings.origin, accountKey);const principal = await accountApi.request('GET','account');if (principal.accountDevice) await accountApi.request('POST','session/revoke',{});} catch { /* Local sign-out still forgets authorization. */ }
 		}
 		this.app.secretStorage.setSecret(`${this.manifest.id}-${this.data.localId}-account`, '');
+		clearOverview(this);
 		this.accountAuthorized = false;
 		this.data.localId = crypto.randomUUID();
 		delete this.data.lastDeletedWorkspace;
@@ -4372,7 +4450,7 @@ export default class IndependentSync extends Plugin {
 		this.app.secretStorage.setSecret(`${this.manifest.id}-${this.data.localId}-access`, '');
 		this.app.secretStorage.setSecret(secretStorageId(this, 'encryption'), '');
 		await this.saveData(this.data);
-		this.overviewIdentity = undefined;
+		clearOverview(this);
 		this.setStatus(t('notebooks.deletedStatus'));
 		this.tab?.update();
 	}
@@ -5470,16 +5548,13 @@ export class IndependentSettings extends PluginSettingTab {
 			} };
 		};
 		const connected = Boolean(config.workspace);
-		const identityScope = () =>
-			`${plugin.data.settings.origin}|${plugin.data.settings.workspace}|${plugin.data.localId}`;
+		const identityScope = () => overviewScope(plugin);
 		const scopeKey = identityScope();
 		const accountConnected = connected || plugin.accountAuthorized === true;
-		const credentialName = connected ? 'access' : 'account';
 		const sameScope = () => !plugin.stopped && identityScope() === scopeKey;
 		const identity = () => {
 			const value = plugin.overviewIdentity;
-			return sameScope() && value?.scope === scopeKey && value.credential === plugin.secret(credentialName) &&
-				value.accountCredential === plugin.secret('account') ? value : undefined;
+			return sameScope() && matchesOverview(plugin, value) ? value : undefined;
 		};
 		const cnWelcome = edition.edition === 'cn' && !accountConnected;
 		const welcome = cnWelcome ? row(chinaAccess.title, setting => {
@@ -5512,28 +5587,14 @@ export class IndependentSettings extends PluginSettingTab {
 			const renderIdentity = () => {
 				for (const listener of plugin.statusListeners ?? []) listener(phase);
 			};
-			const cachedFields = value => ({
-				email: typeof value?.email === 'string' ? value.email : '',
-				label: typeof value?.label === 'string' ? value.label : '',
-				logicalBytes: Number.isSafeInteger(value?.logicalBytes) && value.logicalBytes >= 0 ? value.logicalBytes : undefined,
-			});
-			const persist = (cacheBinding, fields) => {
-				if (!cacheBinding) return;
-				try {
-					const saved = JSON.stringify({ binding: cacheBinding, ...fields });
-					if (plugin.secret('overview-display') !== saved)
-						plugin.app.secretStorage?.setSecret(secretStorageId(plugin, 'overview-display'), saved);
-				} catch { /* The in-memory display remains available. */ }
-			};
 			const refresh = async () => {
 				if (controller.signal.aborted || !sameScope() || loading || !accountConnected) return;
-				const credential = plugin.secret(credentialName);
+				const session = overviewSession(plugin);
+				const { credential } = session;
 				if (!credential) return;
-				const accountCredential = plugin.secret('account');
-				const current = () => !controller.signal.aborted && sameScope() &&
-					credential === plugin.secret(credentialName) && accountCredential === plugin.secret('account');
+				const current = () => !controller.signal.aborted && matchesOverview(plugin, session);
 				const publish = fields => {
-					plugin.overviewIdentity = { ...fields, scope: scopeKey, credential, accountCredential };
+					plugin.overviewIdentity = { ...fields, ...session };
 					renderIdentity();
 				};
 				let cacheBinding;
@@ -5542,10 +5603,10 @@ export class IndependentSettings extends PluginSettingTab {
 					if (connected) local = formatStorageSize(plugin.app.vault.getFiles().reduce((sum, file) => sum + (Number.isFinite(file.stat?.size) ? file.stat.size : 0), 0));
 					if (plugin.app.secretStorage) {
 						try {
-							cacheBinding = await fingerprint(new TextEncoder().encode(JSON.stringify([scopeKey, credential, accountCredential])));
+							cacheBinding = await overviewBinding(session);
 							if (!current()) return;
-							const saved = JSON.parse(plugin.secret('overview-display') || 'null');
-							if (!identity() && saved?.binding === cacheBinding) publish(cachedFields(saved));
+							const saved = loadOverview(plugin, cacheBinding);
+							if (!identity() && saved) publish(saved);
 						} catch { /* A missing or unreadable cache must not block live requests. */ }
 					}
 					update(phase);
@@ -5556,14 +5617,14 @@ export class IndependentSettings extends PluginSettingTab {
 					const [account, notebook, usage] = await Promise.allSettled([
 						api.request('GET', 'account').then(account => {
 							if (!current()) return;
-							const fields = { ...cachedFields(identity()), email: cachedFields(account).email };
+							const fields = overviewFields({ ...identity(), email: account.email });
 							publish(fields);
-							persist(cacheBinding, fields);
+							saveOverview(plugin, cacheBinding, fields);
 						}, error => {
 							if (current() && [401, 403].includes(error?.status)) {
-								const fields = cachedFields(undefined);
+								const fields = overviewFields(undefined);
 								publish(fields);
-								persist(cacheBinding, fields);
+								saveOverview(plugin, cacheBinding, fields);
 							}
 							throw error;
 						}),
@@ -5572,18 +5633,18 @@ export class IndependentSettings extends PluginSettingTab {
 					]);
 					if (!current() || denied(account) || !connected) return;
 					const previous = identity();
-					const fields = cachedFields(previous);
+					const fields = overviewFields(previous);
 					if (denied(notebook) || notebook.reason?.status === 404) {
 						fields.label = '';
 						fields.logicalBytes = undefined;
 					} else {
-						if (notebook.status === 'fulfilled') fields.label = cachedFields(notebook.value).label;
+						if (notebook.status === 'fulfilled') fields.label = overviewFields(notebook.value).label;
 						if (denied(usage) || usage.reason?.status === 404) fields.logicalBytes = undefined;
-						else if (usage.status === 'fulfilled') fields.logicalBytes = cachedFields(usage.value).logicalBytes;
+						else if (usage.status === 'fulfilled') fields.logicalBytes = overviewFields(usage.value).logicalBytes;
 					}
 					if (previous || notebook.status === 'fulfilled' || usage.status === 'fulfilled') {
 						publish(fields);
-						persist(cacheBinding, fields);
+						saveOverview(plugin, cacheBinding, fields);
 					}
 				} catch { /* The next refresh can recover without affecting synchronization. */ }
 				finally { loading = false; }

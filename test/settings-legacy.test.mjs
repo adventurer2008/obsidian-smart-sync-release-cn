@@ -8,8 +8,10 @@ const { IndependentSettings } = await import('../src/plugin.js');
 const { default: IndependentSync } = await import('../src/plugin.js');
 const { PluginSettingTab } = await import('./obsidian-double.mjs');
 const { Setting } = await import('./settings-dom-sdk.mjs');
-const { Platform } = await import('./obsidian-double.mjs');
+const { Platform, syntheticApp } = await import('./obsidian-double.mjs');
 const { cleanConfiguration } = await import('../src/configuration.js');
+const { WorkspaceApi } = await import('../src/client.js');
+const { freshSalt, unlockWorkspace, workspaceProof } = await import('../src/codec.js');
 
 function fixture(t) {
 	const dom = new JSDOM('<main></main>');
@@ -113,13 +115,16 @@ test('overview retries startup credentials and saves the email before cloud usag
 	for (const refresh of first.timers.values()) refresh();
 	await waitFor(() => shown(first, email));
 	assert.equal(shown(first, '25 MB'), false);
-	assert.equal(JSON.parse(saved.get('wujie-sync-synthetic-overview-display')).email, email);
+	assert.equal(JSON.parse(saved.get('wujie-sync-synthetic-overview')).email, email);
 	usage.resolve({ logicalBytes: 25 * 1024 ** 2 });
 	await waitFor(() => shown(first, email) && shown(first, label) && shown(first, '25 MB'));
 	assert.notEqual(requestedSignal, first.plugin.abortController.signal);
 	assert.equal(requestedSignal.aborted, false);
 	first.tab.hide();
 	assert.equal(requestedSignal.aborted, true);
+	const currentKey = 'wujie-sync-synthetic-overview';
+	saved.set('wujie-sync-synthetic-overview-display', saved.get(currentKey));
+	saved.delete(currentKey);
 
 	offline = true;
 	const reopened = fixture(t);
@@ -140,10 +145,63 @@ test('overview retries startup credentials and saves the email before cloud usag
 	reopened.tab.hide();
 	reopened.tab.display();
 	await waitFor(() => !!reopened.plugin.overviewIdentity && !reopened.plugin.overviewIdentity.email &&
-		!JSON.parse(saved.get('wujie-sync-synthetic-overview-display')).email);
+		!JSON.parse(saved.get('wujie-sync-synthetic-overview')).email);
 	assert.equal(shown(reopened, email), false);
 	assert.equal(shown(reopened, label), false);
 	assert.equal(shown(reopened, '25 MB'), false);
+});
+
+test('a verified sync connection saves the email and notebook name before settings open and restores them on restart', async t => {
+	const app = syntheticApp();
+	const manifest = { id: 'wujie-sync', version: '1.1.14' };
+	const plugin = new IndependentSync(app, manifest);
+	t.after(() => { if (!plugin.stopped) plugin.dispose(); });
+	await plugin.onload();
+	const origin = 'https://example.invalid';
+	const workspace = crypto.randomUUID();
+	const email = 'connected@example.invalid', label = 'Verified synthetic notebook';
+	const password = 'fixture-workspace-password', salt = freshSalt();
+	const proof = await workspaceProof(await unlockWorkspace(password, salt));
+	const login = 'a'.repeat(43), device = 'b'.repeat(43);
+	Object.assign(plugin.data.settings, { origin, workspace, lan: '', autoStartup: false, autoTimer: false });
+	plugin.setSecret('access', login);
+	plugin.setSecret('encryption', password);
+	await plugin.saveData(plugin.data);
+	const fetcher = async (url, { headers }) => {
+		switch (new URL(url).pathname) {
+			case `/ss2/workspaces/${workspace}`: return Response.json({ salt, proof, generation: 'fixture', label });
+			case '/ss2/account':
+				assert.equal(headers.authorization, 'Bearer ' + login);
+				return Response.json({ scope: null, email });
+			case '/ss2/session': return Response.json({ id: 'device', key: device });
+			case '/ss2/session/label': return Response.json({});
+			case '/ss2/device-presence': return Response.json({ id: 'device', mode: 'both', peers: [] });
+			default: assert.fail('Unexpected request from the test connection');
+		}
+	};
+	plugin.workspaceApi = (...args) => new WorkspaceApi(...args, fetcher);
+	plugin.verifiedRoute = { binding: JSON.stringify([origin, '', null]), signal: plugin.abortController.signal,
+		at: Date.now(), transport: { fetcher, route: 'primary' } };
+	const { engine } = await plugin.connection();
+	assert.ok(engine);
+	assert.equal(plugin.secret('access'), device);
+	const record = plugin.secret('overview');
+	assert.equal(JSON.parse(record).email, email);
+	assert.equal(JSON.parse(record).label, label);
+	assert.ok(!record.includes(login) && !record.includes(device));
+	plugin.dispose();
+
+	const reopened = new IndependentSync(app, manifest);
+	t.after(() => reopened.dispose());
+	reopened.persisted = structuredClone(plugin.persisted);
+	reopened.workspaceApi = () => { assert.fail('Restart should restore the overview before any settings request'); };
+	await reopened.onload();
+	assert.equal(reopened.overviewIdentity.email, email);
+	assert.equal(reopened.overviewIdentity.label, label);
+	reopened.setSecret('access', 'c'.repeat(43));
+	reopened.overviewIdentity = undefined;
+	await reopened.restoreOverview();
+	assert.equal(reopened.overviewIdentity, undefined);
 });
 
 test('integrated overview preserves all identity and synchronization routes and pairing guidance', async t => {
